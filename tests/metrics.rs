@@ -86,10 +86,7 @@ async fn metrics_report_status_last_success_size_next_fetch_and_fetch_duration()
         size > 1000.0,
         "a repo with a commit takes some space: {size}"
     );
-    assert_eq!(
-        metrics.value("archiver_next_fetch_timestamp_seconds", &[]),
-        Some((start + 24 * 3600) as f64)
-    );
+    assert_eq!(metrics.next_fetch(), Some((start + 24 * 3600) as f64));
     let duration = metrics
         .value("archiver_fetch_duration_seconds", &[])
         .unwrap();

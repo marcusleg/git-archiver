@@ -18,6 +18,7 @@ use git_archiver::{Options, RunningApp};
 use tempfile::TempDir;
 
 use clock::ManualClock;
+use forge::{FakeForge, Upstream};
 
 pub const MINUTE: Duration = Duration::from_secs(60);
 pub const HOUR: Duration = Duration::from_secs(3600);
@@ -45,6 +46,36 @@ impl Page {
 pub fn config_tracking(urls: &[&str]) -> String {
     let repos: Vec<String> = urls.iter().map(|url| format!("  {url:?},\n")).collect();
     format!("repos = [\n{}]\n", repos.concat())
+}
+
+/// Three upstream repos, `a/one`, `a/two` and `a/three`, with one commit
+/// each, and their repo identities.
+pub fn three_repos(forge: &FakeForge) -> (Vec<Upstream>, Vec<String>) {
+    let paths = ["a/one", "a/two", "a/three"];
+    let repos = paths
+        .iter()
+        .map(|path| {
+            let upstream = forge.create_repo(path);
+            upstream.commit("first");
+            upstream
+        })
+        .collect();
+    let ids = paths
+        .iter()
+        .map(|path| format!("http://{}/{path}", forge.host()))
+        .collect();
+    (repos, ids)
+}
+
+/// The upstreams' URLs, for tracking them.
+pub fn urls(repos: &[Upstream]) -> Vec<&str> {
+    repos.iter().map(Upstream::url).collect()
+}
+
+/// Each repo's last success, in Unix seconds, in the order given.
+pub async fn last_successes(app: &TestApp, ids: &[String]) -> Vec<Option<u64>> {
+    let metrics = app.metrics().await;
+    ids.iter().map(|id| metrics.last_success(id)).collect()
 }
 
 impl TestApp {
@@ -178,10 +209,7 @@ impl TestApp {
     pub async fn settle(&self) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let next = self
-                .metrics()
-                .await
-                .value("archiver_next_fetch_timestamp_seconds", &[]);
+            let next = self.next_fetch().await;
             if self.clock.idle() && next.is_some_and(|next| next > self.now() as f64) {
                 return;
             }
@@ -192,6 +220,11 @@ impl TestApp {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// When the scheduler's next fetch is due, in Unix seconds.
+    pub async fn next_fetch(&self) -> Option<f64> {
+        self.metrics().await.next_fetch()
     }
 
     pub async fn metrics(&self) -> Metrics {
@@ -354,6 +387,11 @@ impl Metrics {
     /// `archiver_fetch_errors_total` for a status.
     pub fn fetch_errors(&self, status: &str) -> Option<f64> {
         self.value("archiver_fetch_errors_total", &[("status", status)])
+    }
+
+    /// When the scheduler's next fetch is due, in Unix seconds.
+    pub fn next_fetch(&self) -> Option<f64> {
+        self.value("archiver_next_fetch_timestamp_seconds", &[])
     }
 
     /// When the repo was last fetched successfully, in Unix seconds.

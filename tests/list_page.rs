@@ -95,28 +95,41 @@ fn first<'a>(element: &scraper::ElementRef<'a>, selector: &str) -> scraper::Elem
     element.select(&selector).next().unwrap()
 }
 
-/// The `<dd>` text for each `<dt>` in a card.
-fn fields(card: &scraper::ElementRef) -> Vec<(String, String)> {
+/// Each `<dt>` in a card with its `<dd>`, in order.
+fn field_elements<'a>(
+    card: &scraper::ElementRef<'a>,
+) -> Vec<(scraper::ElementRef<'a>, scraper::ElementRef<'a>)> {
     let (dt, dd) = (
         Selector::parse("dt").unwrap(),
         Selector::parse("dd").unwrap(),
     );
-    let names = card.select(&dt).map(|e| text(&e));
-    let values = card.select(&dd).map(|e| text(&e));
-    names.zip(values).collect()
+    card.select(&dt).zip(card.select(&dd)).collect()
+}
+
+/// The `<dd>` text for each `<dt>` in a card.
+fn fields(card: &scraper::ElementRef) -> Vec<(String, String)> {
+    field_elements(card)
+        .iter()
+        .map(|(name, value)| (text(name), text(value)))
+        .collect()
 }
 
 /// The `<dd>` for the `<dt>` named `name` in a card.
 fn field_value<'a>(card: &scraper::ElementRef<'a>, name: &str) -> scraper::ElementRef<'a> {
-    let (dt, dd) = (
-        Selector::parse("dt").unwrap(),
-        Selector::parse("dd").unwrap(),
-    );
-    card.select(&dt)
-        .zip(card.select(&dd))
+    field_elements(card)
+        .into_iter()
         .find(|(n, _)| text(n) == name)
         .unwrap_or_else(|| panic!("card has no {name:?} field: {:?}", fields(card)))
         .1
+}
+
+/// Checks that a card has no `<dt>` named `name`.
+fn assert_no_field(card: &scraper::ElementRef, name: &str) {
+    let fields = fields(card);
+    assert!(
+        fields.iter().all(|(n, _)| n != name),
+        "card has a {name:?} field: {fields:?}"
+    );
 }
 
 fn field(card: &scraper::ElementRef, name: &str) -> String {
@@ -336,11 +349,7 @@ async fn an_available_repo_shows_its_last_successful_fetch_only_in_its_status_li
         text(&select(&html, "main article .status")[0]),
         "Fetched 3 hours ago"
     );
-    assert!(
-        fields(card).iter().all(|(name, _)| name != "Last success"),
-        "{:?}",
-        fields(card)
-    );
+    assert_no_field(card, "Last success");
 }
 
 #[tokio::test]
@@ -349,9 +358,5 @@ async fn a_repo_not_fetched_yet_shows_no_last_success_field() {
 
     let html = Html::parse_document(&app.get("/").await.text());
     let card = &select(&html, "main article")[0];
-    assert!(
-        fields(card).iter().all(|(name, _)| name != "Last success"),
-        "{:?}",
-        fields(card)
-    );
+    assert_no_field(card, "Last success");
 }

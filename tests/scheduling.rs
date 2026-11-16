@@ -2,35 +2,8 @@
 
 mod common;
 
-use common::forge::{Failure, FakeForge, Upstream};
-use common::{HOUR, MINUTE, TestApp, config_tracking};
-
-/// Three upstream repos with one commit each, and their repo identities.
-fn three_repos(forge: &FakeForge) -> (Vec<Upstream>, Vec<String>) {
-    let repos: Vec<Upstream> = ["a/one", "a/two", "a/three"]
-        .iter()
-        .map(|path| {
-            let upstream = forge.create_repo(path);
-            upstream.commit("first");
-            upstream
-        })
-        .collect();
-    let ids = ["a/one", "a/two", "a/three"]
-        .iter()
-        .map(|path| format!("http://{}/{path}", forge.host()))
-        .collect();
-    (repos, ids)
-}
-
-fn urls(repos: &[Upstream]) -> Vec<&str> {
-    repos.iter().map(Upstream::url).collect()
-}
-
-/// Each repo's last success, in Unix seconds, in the order given.
-async fn last_successes(app: &TestApp, ids: &[String]) -> Vec<Option<u64>> {
-    let metrics = app.metrics().await;
-    ids.iter().map(|id| metrics.last_success(id)).collect()
-}
+use common::forge::{Failure, FakeForge};
+use common::{HOUR, MINUTE, TestApp, config_tracking, last_successes, three_repos, urls};
 
 #[tokio::test]
 async fn three_repos_in_a_24h_interval_are_fetched_one_every_8_hours_oldest_first() {
@@ -55,10 +28,7 @@ async fn three_repos_in_a_24h_interval_are_fetched_one_every_8_hours_oldest_firs
     app.advance_and_settle(8 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [h(32), h(16), h(24)]);
 
-    let next = app
-        .metrics()
-        .await
-        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    let next = app.next_fetch().await;
     assert_eq!(next, h(40).map(|t| t as f64));
 }
 
@@ -77,10 +47,7 @@ async fn restarting_with_a_fetch_overdue_runs_just_that_fetch_right_away() {
     app.settle().await;
 
     assert_eq!(last_successes(&app, &ids).await, [h(8), h(28), None]);
-    let next = app
-        .metrics()
-        .await
-        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    let next = app.next_fetch().await;
     assert_eq!(next, h(36).map(|t| t as f64));
 }
 
@@ -98,10 +65,7 @@ async fn restarting_with_nothing_overdue_fetches_nothing_until_the_next_due_time
     app.start_again().await;
     app.settle().await;
     assert_eq!(last_successes(&app, &ids).await, [h(8), None, None]);
-    let next = app
-        .metrics()
-        .await
-        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    let next = app.next_fetch().await;
     assert_eq!(next, h(16).map(|t| t as f64), "due from the saved state");
 
     app.advance_and_settle(3 * HOUR).await;
@@ -128,10 +92,7 @@ async fn a_repo_added_to_the_config_by_hand_is_fetched_from_the_next_fetch_on_an
     // Due 24h / 3 after the last attempt; never-attempted repos tie by
     // config order.
     assert_eq!(last_successes(&app, &ids).await, [h(12), h(20), None]);
-    let next = app
-        .metrics()
-        .await
-        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    let next = app.next_fetch().await;
     assert_eq!(next, h(28).map(|t| t as f64));
 
     app.advance_and_settle(8 * HOUR).await;
@@ -147,10 +108,7 @@ async fn a_repo_untracked_by_hand_widens_the_gap_from_the_next_fetch_on() {
     let h = |hours: u64| Some(start + hours * 3600);
     app.advance_and_settle(8 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [h(8), None, None]);
-    let next = app
-        .metrics()
-        .await
-        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    let next = app.next_fetch().await;
     assert_eq!(
         next,
         h(16).map(|t| t as f64),
@@ -160,10 +118,7 @@ async fn a_repo_untracked_by_hand_widens_the_gap_from_the_next_fetch_on() {
     app.write_config(&config_tracking(&urls(&repos[..2])));
     app.advance_and_settle(MINUTE).await;
 
-    let next = app
-        .metrics()
-        .await
-        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    let next = app.next_fetch().await;
     assert_eq!(
         next,
         h(20).map(|t| t as f64),
@@ -190,10 +145,7 @@ async fn a_failed_fetch_counts_as_an_attempt_and_the_next_repo_still_gets_its_tu
 
     app.advance_and_settle(12 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [None, None]);
-    let next = app
-        .metrics()
-        .await
-        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    let next = app.next_fetch().await;
     assert_eq!(next, h(24).map(|t| t as f64), "the failure was an attempt");
 
     app.advance_and_settle(12 * HOUR).await;
@@ -217,7 +169,7 @@ async fn a_fetch_that_hangs_is_stopped_after_an_hour_and_counts_as_an_attempt() 
     let metrics = app.metrics().await;
     assert_eq!(metrics.last_success(&id), None);
     assert_eq!(
-        metrics.value("archiver_next_fetch_timestamp_seconds", &[]),
+        metrics.next_fetch(),
         Some((start + 48 * 3600) as f64),
         "the attempt at 24h counts"
     );

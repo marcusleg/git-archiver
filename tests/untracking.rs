@@ -7,7 +7,7 @@ use common::forge::{FakeForge, Upstream};
 use common::git::{preserved_refs, refs};
 use std::time::Duration;
 
-use common::{HOUR, MINUTE, Page, TestApp, config_tracking};
+use common::{HOUR, MINUTE, Page, TestApp, config_tracking, last_successes, three_repos, urls};
 use scraper::{ElementRef, Html, Selector};
 
 fn select<'a>(html: &'a Html, selector: &str) -> Vec<ElementRef<'a>> {
@@ -150,53 +150,29 @@ async fn untracking_with_keep_archive_stops_fetching_and_lists_the_archive_as_un
 #[tokio::test]
 async fn untracking_a_repo_widens_the_gap_from_the_next_fetch_on() {
     let forge = FakeForge::start().await;
-    let paths = ["a/one", "a/two", "a/three"];
-    let repos: Vec<Upstream> = paths
-        .iter()
-        .map(|path| {
-            let upstream = forge.create_repo(path);
-            upstream.commit("first");
-            upstream
-        })
-        .collect();
-    let ids: Vec<String> = paths
-        .iter()
-        .map(|path| format!("http://{}/{path}", forge.host()))
-        .collect();
-    let urls: Vec<&str> = repos.iter().map(Upstream::url).collect();
-    let app = TestApp::tracking(&urls).await;
+    let (repos, ids) = three_repos(&forge);
+    let app = TestApp::tracking(&urls(&repos)).await;
     let start = app.now();
     let h = |hours: u64| Some(start + hours * 3600);
-    let next_fetch = async || {
-        app.metrics()
-            .await
-            .value("archiver_next_fetch_timestamp_seconds", &[])
-    };
-    let last_successes = async || {
-        let metrics = app.metrics().await;
-        ids.iter()
-            .map(|id| metrics.last_success(id))
-            .collect::<Vec<_>>()
-    };
     app.advance_and_settle(8 * HOUR).await;
-    assert_eq!(last_successes().await, [h(8), None, None]);
+    assert_eq!(last_successes(&app, &ids).await, [h(8), None, None]);
     assert_eq!(
-        next_fetch().await,
+        app.next_fetch().await,
         h(16).map(|t| t as f64),
         "24h / 3 after the last attempt"
     );
 
-    let page = untrack(&app, urls[2], "Keep archive").await;
+    let page = untrack(&app, repos[2].url(), "Keep archive").await;
     assert_eq!(page.status, 200, "{}", page.text());
     app.advance_and_settle(MINUTE).await;
 
     assert_eq!(
-        next_fetch().await,
+        app.next_fetch().await,
         h(20).map(|t| t as f64),
         "24h / 2 after the last attempt"
     );
     app.advance_and_settle(12 * HOUR - MINUTE).await;
-    assert_eq!(last_successes().await, [h(8), h(20), None]);
+    assert_eq!(last_successes(&app, &ids).await, [h(8), h(20), None]);
 }
 
 #[tokio::test]
