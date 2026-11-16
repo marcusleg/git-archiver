@@ -16,6 +16,7 @@ pub type SharedOverview = Arc<Overview>;
 #[derive(Debug)]
 pub struct Overview {
     inner: Mutex<Inner>,
+    save_lock: Mutex<()>,
     state_path: PathBuf,
 }
 
@@ -94,6 +95,7 @@ impl Overview {
                 state,
                 ..Inner::default()
             }),
+            save_lock: Mutex::new(()),
             state_path,
         })
     }
@@ -186,41 +188,38 @@ impl Overview {
         size: Option<u64>,
         result: Result<Vec<String>, FetchError>,
     ) {
-        let _save = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let state = {
-            let mut inner = self.inner();
+        self.change(|inner| {
             inner.record_fetch(id, attempt, duration, size, result);
             inner.fetch_first.retain(|queued| queued != id);
-            inner.state.clone()
-        };
-        self.save(&state);
+        });
     }
 
     /// Forgets the state of every identity that shares the archive of `id`,
     /// and saves.
     pub fn forget(&self, id: &RepoId) {
-        let _save = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let state = {
-            let mut inner = self.inner();
+        self.change(|inner| {
             inner
                 .state
                 .repos
                 .retain(|key, _| RepoId::from_url(key).map_or(true, |other| other != *id));
-            inner.state.clone()
-        };
-        self.save(&state);
+        });
     }
 
-    fn save(&self, state: &State) {
+    /// Applies `change` and saves the resulting state. The save lock is held
+    /// from taking a copy of the state until it's written, so an older copy
+    /// never overwrites a newer one.
+    fn change(&self, change: impl FnOnce(&mut Inner)) {
+        let _save = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let state = {
+            let mut inner = self.inner();
+            change(&mut inner);
+            inner.state.clone()
+        };
         if let Err(e) = state.save(&self.state_path) {
             tracing::error!(error = %format!("{e:#}"), "couldn't save state");
         }
     }
 }
-
-/// Held from taking a copy of the state until it's saved, so an older copy
-/// never overwrites a newer one.
-static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 impl Inner {
     fn repo_state(&self, id: &RepoId) -> Option<&RepoState> {
