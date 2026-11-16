@@ -255,9 +255,11 @@ pub fn load_locked<T>(path: &Path, f: impl FnOnce(anyhow::Result<Config>) -> T) 
 }
 
 /// Checks that the repo could be added now: the config is valid and doesn't
-/// track a repo with the same archive yet.
-pub fn check_add(path: &Path, id: &RepoId) -> Result<(), AddError> {
-    read_for_add(path, id).map(drop)
+/// track a repo with the same archive yet. Returns the token to check
+/// upstream with, if the repo's host has one.
+pub fn check_add(path: &Path, id: &RepoId) -> Result<Option<Token>, AddError> {
+    let (_, config) = read_for_add(path, id)?;
+    Ok(config.tokens.for_repo(id).cloned())
 }
 
 /// Appends `url`, whose identity is `id`, to `repos`, then calls `on_added`

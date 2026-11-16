@@ -155,11 +155,11 @@ async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
         return Err("Enter the URL of the repo to add.".to_owned());
     }
     let id = config::check_repo_url(url).map_err(|problem| format!("“{url}” {problem}."))?;
-    config::check_add(&app.config_path, &id).map_err(|e| add_error(app, url, e))?;
+    let token = config::check_add(&app.config_path, &id).map_err(|e| add_error(app, url, e))?;
 
     let deadline = app.clock.now() + PROBE_TIMEOUT;
     let probe = tokio::select! {
-        result = archive::probe(url) => result,
+        result = archive::probe(url, token.as_ref()) => result,
         () = app.clock.sleep_until(deadline) => {
             Err("it didn’t answer within a minute.".to_owned())
         }

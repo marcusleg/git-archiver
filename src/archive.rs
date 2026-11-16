@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::time::SystemTime;
 
 use anyhow::{Context, bail};
@@ -308,12 +308,12 @@ impl Archives {
 }
 
 /// Asks upstream for its `HEAD` without fetching anything, to check that the
-/// URL answers like a git repo. On failure, returns what git said.
-pub async fn probe(url: &str) -> Result<(), String> {
-    let output = command(Path::new("."), &["ls-remote", url, "HEAD"])
-        .output()
+/// URL answers like a git repo. The token, if any, is sent the way a fetch
+/// sends it. On failure, returns what git said.
+pub async fn probe(url: &str, token: Option<&Token>) -> Result<(), String> {
+    let output = upstream_output(Path::new("."), &["ls-remote", url, "HEAD"], url, token)
         .await
-        .map_err(|e| format!("couldn't run git: {e}"))?;
+        .map_err(|e| format!("{e:#}"))?;
     if output.status.success() {
         return Ok(());
     }
@@ -450,6 +450,21 @@ async fn git_with_input(dir: &Path, args: &[&str], input: &str) -> anyhow::Resul
 /// Runs a git command that talks to the upstream at `url`, sending it the
 /// token if there is one. Its failure is a [`FetchError`], classified from
 /// git's stderr.
+async fn git_upstream(
+    dir: &Path,
+    args: &[&str],
+    url: &str,
+    token: Option<&Token>,
+) -> anyhow::Result<String> {
+    let output = upstream_output(dir, args, url, token).await?;
+    if !output.status.success() {
+        return Err(classify(&String::from_utf8_lossy(&output.stderr)).into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Runs a git command that talks to the upstream at `url`, sending it the
+/// token if there is one, and returns what git printed and how it exited.
 ///
 /// The token reaches git only through its environment, set through git's
 /// `GIT_CONFIG_*` variables, so it never shows up in process arguments and is
@@ -460,14 +475,16 @@ async fn git_with_input(dir: &Path, args: &[&str], input: &str) -> anyhow::Resul
 /// redirects, with the token offered only by a credential helper scoped to
 /// `url`'s scheme, host and port: git then hands it over only if that host
 /// answers 401, and never to another host.
-async fn git_upstream(
+async fn upstream_output(
     dir: &Path,
     args: &[&str],
     url: &str,
     token: Option<&Token>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Output> {
+    let run =
+        |mut command: Command| async move { command.output().await.context("couldn't run git") };
     let Some(token) = token else {
-        return run_upstream(command(dir, args)).await;
+        return run(command(dir, args)).await;
     };
     let mut direct = command(dir, args);
     with_config(
@@ -480,30 +497,24 @@ async fn git_upstream(
             ),
         ],
     );
-    match run_upstream(direct).await {
-        Err(e) if format!("{e:#}").contains("The requested URL returned error: 30") => {}
-        result => return result,
+    let output = run(direct).await?;
+    let redirected = !output.status.success()
+        && String::from_utf8_lossy(&output.stderr).contains("The requested URL returned error: 30");
+    if !redirected {
+        return Ok(output);
     }
 
     let origin = url::Url::parse(url)
         .with_context(|| format!("{url:?} is not a valid URL"))?
         .origin()
         .ascii_serialization();
-    let mut redirected = command(dir, args);
+    let mut following = command(dir, args);
     with_config(
-        &mut redirected,
+        &mut following,
         &[(&format!("credential.{origin}.helper"), CREDENTIAL_HELPER)],
     );
-    redirected.env(TOKEN_VARIABLE, token.reveal());
-    run_upstream(redirected).await
-}
-
-async fn run_upstream(mut command: Command) -> anyhow::Result<String> {
-    let output = command.output().await.context("couldn't run git")?;
-    if !output.status.success() {
-        return Err(classify(&String::from_utf8_lossy(&output.stderr)).into());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    following.env(TOKEN_VARIABLE, token.reveal());
+    run(following).await
 }
 
 /// Sets git config for one command through the environment.
