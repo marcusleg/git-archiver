@@ -101,7 +101,8 @@ async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
             tracing::warn!(repo = %repo.id, error = %format!("{e:#}"), "couldn't read archive");
             Inspection::default()
         });
-        cards.push((repo, state, inspection));
+        let archived = app.archives.exists(&repo.id);
+        cards.push((repo, state, inspection, archived));
     }
     let now = app.clock.now();
 
@@ -123,8 +124,10 @@ async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
                         "Tracked repos " span .count { (cards.len()) }
                     }
                     ul .repos {
-                        @for (repo, state, inspection) in &cards {
-                            li { (repo_card(repo, state, inspection, &base, now)) }
+                        @for (repo, state, inspection, archived) in &cards {
+                            li {
+                                (repo_card(repo, state, inspection, archived.then_some(&*base), now))
+                            }
                         }
                     }
                 }
@@ -138,14 +141,11 @@ fn repo_card(
     repo: &Tracked,
     state: &RepoState,
     inspection: &Inspection,
-    base: &str,
+    // Where the git endpoint is, if the repo has an archive to clone yet.
+    endpoint_base: Option<&str>,
     now: SystemTime,
 ) -> Markup {
-    let clone = format!(
-        "git clone {base}{}{}.git",
-        git_http::PREFIX,
-        repo.id.host_and_path()
-    );
+    let clone = endpoint_base.map(|base| git_http::clone_command(base, &repo.id));
     let fetched = state.status == Some(Status::Available);
     html! {
         article .card {
@@ -221,6 +221,7 @@ fn repo_card(
                     }
                 }
             }
+            @if let Some(clone) = clone {
             div .clone-line {
                 code .clone { (clone) }
                 button .icon-button type="button" data-copy=(clone)
@@ -228,6 +229,7 @@ fn repo_card(
                     (icon_copy())
                     (icon_check())
                 }
+            }
             }
         }
     }
@@ -336,7 +338,8 @@ fn layout(content: Markup) -> Markup {
 
 /// Copies a `data-copy` button's text. The clipboard API needs a secure
 /// context, which a plain-HTTP server on another host isn't, so it falls
-/// back to selecting the text and copying the selection.
+/// back to selecting the text and copying the selection, as it does when the
+/// browser denies clipboard access.
 const COPY_SCRIPT: &str = r#"
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-copy]");
@@ -345,15 +348,18 @@ document.addEventListener("click", (event) => {
     button.classList.add("copied");
     setTimeout(() => button.classList.remove("copied"), 1500);
   };
+  const selectAndCopy = () => {
+    const range = document.createRange();
+    range.selectNodeContents(button.previousElementSibling);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    if (document.execCommand("copy")) copied();
+  };
   if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(button.dataset.copy).then(copied);
-    return;
+    navigator.clipboard.writeText(button.dataset.copy).then(copied, selectAndCopy);
+  } else {
+    selectAndCopy();
   }
-  const range = document.createRange();
-  range.selectNodeContents(button.previousElementSibling);
-  getSelection().removeAllRanges();
-  getSelection().addRange(range);
-  if (document.execCommand("copy")) copied();
 });
 "#;
 
