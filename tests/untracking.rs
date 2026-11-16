@@ -403,14 +403,42 @@ async fn the_config_warning_names_a_hosts_key_with_credentials_without_showing_t
 
 #[tokio::test]
 async fn the_config_warning_names_an_unknown_field_with_credentials_without_showing_them() {
+    // The repo list takes lines 1 to 5, so each table starts on line 6.
     let tables = [
         (
             "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw@github.com\" = \"x\"\n",
-            "expected `token`",
+            "line 8 (`\"https://…@github.com\"`), column 1: \
+             unknown field `https://…@github.com`, expected `token`",
         ),
         (
             "[\"https://user:secretpw@github.com\"]\ntoken = \"x\"\n",
-            "expected one of `interval`",
+            "line 6, column 2: unknown field `https://…@github.com`, \
+             expected one of `interval`, `listen`, `repos`, `hosts`",
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secret\\\"pw@github.com\" = \"x\"\n",
+            "line 8 (`\"https://…@github.com\"`), column 1: \
+             unknown field `https://…@github.com`, expected `token`",
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n'https://user:secret\"pw@github.com' = \"x\"\n",
+            "line 8 (`\"https://…@github.com\"`), column 1: \
+             unknown field `https://…@github.com`, expected `token`",
+        ),
+        (
+            "['https://user:secret\"pw@github.com']\ntoken = \"x\"\n",
+            "line 6, column 2: unknown field `https://…@github.com`, \
+             expected one of `interval`, `listen`, `repos`, `hosts`",
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n'https://user:secretpw\"@\"github.com' = \"x\"\n",
+            "line 8 (`\"https://…@\\\"github.com\"`), column 1: \
+             unknown field `https://…@\"github.com`, expected `token`",
+        ),
+        (
+            "[\"user:se://cretpw@github.com\"]\ntoken = \"x\"\n",
+            "line 6, column 2: unknown field `…@github.com`, \
+             expected one of `interval`, `listen`, `repos`, `hosts`",
         ),
         (
             "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw\\u0040github.com\" = \"x\"\n",
@@ -428,16 +456,20 @@ async fn the_config_warning_names_an_unknown_field_with_credentials_without_show
         ))
         .await;
 
-        assert!(banner.contains("line "), "where: {banner}");
-        assert!(banner.contains("column "), "where: {banner}");
+        assert!(banner.contains(expected), "where and what: {banner}");
+        // The log quotes the error, escaping its quotes and backslashes.
+        let expected_logged = expected.escape_debug().to_string();
         assert!(
-            banner.contains("unknown field `https://…@github.com`"),
-            "what: {banner}"
+            logged.contains(&expected_logged),
+            "where and what: {logged}"
         );
-        assert!(banner.contains(expected), "what was expected: {banner}");
-        assert!(!page.contains("user:"), "{page}");
-        assert!(logged.contains("unknown field"), "{logged}");
-        assert!(!logged.contains("user:"), "{logged}");
+        for shown in ["secret", "se://", "user:"] {
+            assert!(!page.contains(shown), "{table:?} shows {shown:?}: {page}");
+            assert!(
+                !logged.contains(shown),
+                "{table:?} shows {shown:?}: {logged}"
+            );
+        }
     }
 }
 
