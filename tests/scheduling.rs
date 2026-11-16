@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::forge::{FakeForge, Upstream};
+use common::forge::{Failure, FakeForge, Upstream};
 use common::{HOUR, TestApp, config_tracking};
 
 /// Three upstream repos with one commit each, and their repo identities.
@@ -185,4 +185,27 @@ async fn a_fetch_that_hangs_is_stopped_after_an_hour_and_counts_as_an_attempt() 
         Some((start + 48 * 3600) as f64),
         "the attempt at 24h counts"
     );
+}
+
+#[tokio::test]
+async fn a_permanently_failing_repo_among_three_never_holds_up_the_other_two() {
+    let forge = FakeForge::start().await;
+    let (repos, ids) = three_repos(&forge);
+    forge.fail("a/two", Failure::ServerError);
+    let app = TestApp::tracking(&urls(&repos)).await;
+    let start = app.now();
+    let h = |hours: u64| Some(start + hours * 3600);
+
+    for _ in 0..3 {
+        app.advance_and_settle(8 * HOUR).await;
+    }
+    assert_eq!(last_successes(&app, &ids).await, [h(8), None, h(24)]);
+
+    for _ in 0..3 {
+        app.advance_and_settle(8 * HOUR).await;
+    }
+    assert_eq!(last_successes(&app, &ids).await, [h(32), None, h(48)]);
+    let metrics = app.metrics().await;
+    assert_eq!(metrics.repo_status(&ids[1]), Some("fetch_failed"));
+    assert_eq!(metrics.fetch_errors("fetch_failed"), Some(2.0));
 }

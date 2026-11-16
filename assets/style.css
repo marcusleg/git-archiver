@@ -228,6 +228,28 @@ main {
   color: var(--accent-green);
 }
 
+.status.unavailable .icon {
+  color: var(--accent-pink);
+}
+
+.status.fetch-failed .icon {
+  color: var(--accent-orange);
+}
+
+/* Git's message under a failed status, as git wrote it */
+.reason {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));

@@ -142,6 +142,28 @@ fn repo_card(
                     (icon_circle_check())
                     span { "Fetched " (time(success, now)) }
                 },
+                (Some(Status::Unavailable), _) => {
+                    p .status.unavailable {
+                        (icon_ban())
+                        span {
+                            "Unavailable"
+                            @if let Some(since) = state.status_since {
+                                " since " (date(since))
+                            }
+                            @if let Some(http_status) = state.http_status {
+                                " · HTTP " (http_status)
+                            }
+                        }
+                    }
+                    (reason(state))
+                },
+                (Some(Status::FetchFailed), _) => {
+                    p .status.fetch-failed {
+                        (icon_refresh_cw_off())
+                        span { "Fetch failed" }
+                    }
+                    (reason(state))
+                },
                 _ => p .status {
                     (icon_clock())
                     span { "Not fetched yet" }
@@ -186,6 +208,31 @@ fn repo_card(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Git's message for the last failed fetch, as git wrote it.
+fn reason(state: &RepoState) -> Markup {
+    html! {
+        @if let Some(error) = &state.error {
+            pre .reason { (error) }
+        }
+    }
+}
+
+/// A `<time>` showing the UTC date, e.g. "23 Oct 2026", with the exact time
+/// on hover.
+fn date(at: SystemTime) -> Markup {
+    let exact = humantime::format_rfc3339_seconds(at).to_string();
+    let (year, month, day) = (&exact[0..4], &exact[5..7], &exact[8..10]);
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][month.parse::<usize>().expect("RFC 3339 has a month") - 1];
+    let day = day.trim_start_matches('0');
+    html! {
+        time datetime=(exact) title=(exact.replace('T', " ").replace('Z', " UTC")) {
+            (day) " " (month) " " (year)
         }
     }
 }
@@ -265,6 +312,22 @@ fn icon_archive() -> Markup {
 fn icon_circle_check() -> Markup {
     PreEscaped(
         r#"<svg class="icon icon-circle-check" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>"#
+            .to_owned(),
+    )
+}
+
+/// Lucide `ban`.
+fn icon_ban() -> Markup {
+    PreEscaped(
+        r#"<svg class="icon icon-ban" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.929 4.929 19.07 19.071"/><circle cx="12" cy="12" r="10"/></svg>"#
+            .to_owned(),
+    )
+}
+
+/// Lucide `refresh-cw-off`.
+fn icon_refresh_cw_off() -> Markup {
+    PreEscaped(
+        r#"<svg class="icon icon-refresh-cw-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8L18.74 5.74A9.75 9.75 0 0 0 12 3C11 3 10.03 3.16 9.13 3.47"/><path d="M8 16H3v5"/><path d="M3 12C3 9.51 4 7.26 5.64 5.64"/><path d="m3 16 2.26 2.26A9.75 9.75 0 0 0 12 21c2.49 0 4.74-1 6.36-2.64"/><path d="M21 12c0 1-.16 1.97-.47 2.87"/><path d="M21 3v5h-5"/><path d="M22 22 2 2"/></svg>"#
             .to_owned(),
     )
 }

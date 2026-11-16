@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::archive::Archives;
+use crate::archive::{Archives, FetchError};
 use crate::clock::Clock;
 use crate::config;
 use crate::overview::{SharedOverview, Tracked, tracked};
+use crate::state::Status;
 
 /// Every fetch is stopped after this long.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -85,10 +86,12 @@ impl Scheduler {
         tracing::info!(repo = %repo.id, "fetching");
         let result = tokio::select! {
             result = self.archives.fetch(&repo.id, &repo.url) => result,
-            () = self.clock.sleep_until(attempt + FETCH_TIMEOUT) => Err(anyhow::anyhow!(
-                "fetch timed out after {}",
-                humantime::format_duration(FETCH_TIMEOUT)
-            )),
+            () = self.clock.sleep_until(attempt + FETCH_TIMEOUT) => Err(FetchError::Failed {
+                reason: format!(
+                    "fetch timed out after {}",
+                    humantime::format_duration(FETCH_TIMEOUT)
+                ),
+            }),
         };
         let duration = timer.elapsed();
         let size = self.archives.size(&repo.id).await;
@@ -96,17 +99,44 @@ impl Scheduler {
         let state = {
             let mut overview = self.overview.lock().unwrap();
             overview.last_fetch_duration = Some(duration);
+            match &result {
+                Ok(()) => {}
+                Err(FetchError::Unavailable { .. }) => overview.fetch_errors.unavailable += 1,
+                Err(FetchError::Failed { .. }) => overview.fetch_errors.fetch_failed += 1,
+            }
             let entry = overview.state.repos.entry(repo.id.to_string()).or_default();
             entry.record_attempt(attempt, size);
-            match result {
+            let previous = entry.record_result(attempt, &result);
+            let from = |previous: Option<Status>| previous.map_or("none", Status::as_str);
+            match &result {
                 Ok(()) => {
-                    if entry.record_success(attempt) {
-                        tracing::info!(repo = %repo.id, status = "available", "status changed");
+                    if let Some(previous) = previous {
+                        tracing::info!(
+                            repo = %repo.id,
+                            from = %from(previous),
+                            to = %Status::Available.as_str(),
+                            "status changed",
+                        );
                     }
                     tracing::info!(repo = %repo.id, duration_ms = duration.as_millis(), "fetched");
                 }
                 Err(e) => {
-                    tracing::warn!(repo = %repo.id, error = %format!("{e:#}"), "fetch failed")
+                    let to = entry.status.expect("a result sets the status");
+                    match previous {
+                        Some(previous) => tracing::warn!(
+                            repo = %repo.id,
+                            from = %from(previous),
+                            to = %to.as_str(),
+                            reason = e.reason(),
+                            "status changed",
+                        ),
+                        None => tracing::warn!(
+                            repo = %repo.id,
+                            status = %to.as_str(),
+                            reason = e.reason(),
+                            "fetch unsuccessful",
+                        ),
+                    }
                 }
             }
             overview.state.clone()

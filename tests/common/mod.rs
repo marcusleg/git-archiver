@@ -7,6 +7,7 @@
 pub mod clock;
 pub mod forge;
 pub mod git;
+pub mod logs;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -257,6 +258,43 @@ impl Metrics {
                         .all(|(k, v)| s.labels.iter().any(|(sk, sv)| sk == k && sv == v))
             })
             .map(|s| s.value)
+    }
+
+    /// The repo's status: the one `archiver_repo_status` sample that is 1.
+    /// Checks there is a sample for every status and the others are 0.
+    pub fn repo_status(&self, repo: &str) -> Option<&'static str> {
+        let statuses = ["available", "unavailable", "fetch_failed"];
+        let values: Vec<Option<f64>> = statuses
+            .iter()
+            .map(|status| {
+                self.value(
+                    "archiver_repo_status",
+                    &[("repo", repo), ("status", status)],
+                )
+            })
+            .collect();
+        if values.iter().all(Option::is_none) {
+            return None;
+        }
+        let ones: Vec<&'static str> = statuses
+            .iter()
+            .zip(&values)
+            .filter(|(_, value)| **value == Some(1.0))
+            .map(|(status, _)| *status)
+            .collect();
+        assert!(
+            ones.len() == 1
+                && values
+                    .iter()
+                    .all(|v| matches!(v, Some(v) if *v == 0.0 || *v == 1.0)),
+            "one status at 1, the others at 0: {values:?}"
+        );
+        Some(ones[0])
+    }
+
+    /// `archiver_fetch_errors_total` for a status.
+    pub fn fetch_errors(&self, status: &str) -> Option<f64> {
+        self.value("archiver_fetch_errors_total", &[("status", status)])
     }
 
     /// When the repo was last fetched successfully, in Unix seconds.
