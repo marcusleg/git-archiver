@@ -210,7 +210,7 @@ impl TestApp {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let next = self.next_fetch().await;
-            if self.clock.idle() && next.is_some_and(|next| next > self.now() as f64) {
+            if self.clock.idle() && next.is_some_and(|next| next > self.now()) {
                 return;
             }
             assert!(
@@ -223,7 +223,7 @@ impl TestApp {
     }
 
     /// When the scheduler's next fetch is due, in Unix seconds.
-    pub async fn next_fetch(&self) -> Option<f64> {
+    pub async fn next_fetch(&self) -> Option<u64> {
         self.metrics().await.next_fetch()
     }
 
@@ -390,8 +390,9 @@ impl Metrics {
     }
 
     /// When the scheduler's next fetch is due, in Unix seconds.
-    pub fn next_fetch(&self) -> Option<f64> {
+    pub fn next_fetch(&self) -> Option<u64> {
         self.value("archiver_next_fetch_timestamp_seconds", &[])
+            .map(whole_seconds)
     }
 
     /// When the repo was last fetched successfully, in Unix seconds.
@@ -400,8 +401,18 @@ impl Metrics {
             "archiver_repo_last_success_timestamp_seconds",
             &[("repo", repo)],
         )
-        .map(|v| v as u64)
+        .map(whole_seconds)
     }
+}
+
+/// A timestamp sample as whole Unix seconds; fails on anything else, so the
+/// conversion never hides a fraction.
+fn whole_seconds(value: f64) -> u64 {
+    assert!(
+        value >= 0.0 && value.fract() == 0.0,
+        "not whole Unix seconds: {value}"
+    );
+    value as u64
 }
 
 /// Parses `name{label="value",...} value`, unescaping label values.

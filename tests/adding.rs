@@ -370,11 +370,7 @@ async fn adding_a_repo_counts_as_its_first_attempt_and_the_gap_reflects_the_new_
     app.settle().await;
 
     assert_eq!(last_successes(&app, &ids).await, [h(12), None, h(14)]);
-    assert_eq!(
-        app.next_fetch().await,
-        h(22).map(|t| t as f64),
-        "24h / 3 after the clone"
-    );
+    assert_eq!(app.next_fetch().await, h(22), "24h / 3 after the clone");
 
     app.advance_and_settle(8 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [h(12), h(22), h(14)]);
