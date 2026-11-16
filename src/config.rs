@@ -160,7 +160,7 @@ fn parse(text: &str) -> anyhow::Result<Config> {
 
 /// Names the place and the problem but, unlike toml's own message, doesn't
 /// quote the line or any string value, either of which may be a token. Names
-/// the key instead, if the line sets one.
+/// the key instead, if the line sets one, with any credentials in it hidden.
 fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let message = hide_strings(error.message().trim());
     let Some(span) = error.span() else {
@@ -171,13 +171,39 @@ fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let line_number = text[..start].matches('\n').count() + 1;
     let column = text[line_start..start].chars().count() + 1;
     let line = text[line_start..].lines().next().unwrap_or_default();
-    let place = match line.split_once('=') {
-        Some((key, _)) if !key.trim().is_empty() => {
-            format!("line {line_number} (`{}`)", hide_credentials(key.trim()))
+    let place = match key_set_on(line) {
+        Some(key) => {
+            let shown = hide_credentials(key);
+            format!("line {line_number} (`{shown}`)")
         }
-        _ => format!("line {line_number}"),
+        None => format!("line {line_number}"),
     };
     anyhow::anyhow!("{place}, column {column}: {message}")
+}
+
+/// The key a `key = value` line sets: everything up to the first `=` outside
+/// quotes, since a quoted key such as a URL may hold an `=` of its own. None
+/// for a table header, or a line that sets no key.
+fn key_set_on(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.starts_with('[') {
+        return None;
+    }
+    let mut quote = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        match quote {
+            // Only a double-quoted key has escapes, such as `\"`.
+            Some('"') if escaped => escaped = false,
+            Some('"') if c == '\\' => escaped = true,
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '=' => return Some(line[..i].trim()).filter(|key| !key.is_empty()),
+            None => {}
+        }
+    }
+    None
 }
 
 /// Replaces every double-quoted string in a message, such as the value in
@@ -214,20 +240,20 @@ fn validate_repo_url(repo: String) -> anyhow::Result<String> {
     Ok(repo)
 }
 
-/// The URL as written, with everything between the scheme and the last `@`
-/// replaced by `…`, so a rejection can name a repo entry or `hosts` key, or
-/// the key on a line, without showing a credential in the UI or the log. Any
-/// user name and password end at an `@`, so cutting up to the last one also
-/// covers a URL that a parser reads differently than its author meant, such
-/// as one whose unencoded password holds a `#`.
-fn hide_credentials(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
+/// The text as written, with everything between a URL scheme and the last
+/// `@` replaced by `…`, so an error can name what it rejects without showing
+/// a credential in the UI or the log. Any user name and password end at an
+/// `@`, so cutting up to the last one also covers a URL that a parser reads
+/// differently than its author meant, such as one whose unencoded password
+/// holds a `#`.
+fn hide_credentials(text: &str) -> String {
+    let (scheme, rest) = match text.split_once("://") {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
-        None => (String::new(), url),
+        None => (String::new(), text),
     };
     match rest.rfind('@') {
         Some(at) => format!("{scheme}…{}", &rest[at..]),
-        None => url.to_owned(),
+        None => text.to_owned(),
     }
 }
 

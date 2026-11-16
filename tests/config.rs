@@ -140,11 +140,23 @@ async fn a_rejected_hosts_key_is_named_without_its_credentials() {
         ),
         (
             "[hosts]\n\"https://user:secretpw@github.com\" = \"x\"",
-            "line 2",
+            "line 2 (`\"https://…@github.com\"`)",
         ),
         (
             "hosts.\"https://user:secretpw@github.com\".token = 5",
-            "line 1",
+            "line 1 (`hosts.\"https://…@github.com\".token`)",
+        ),
+        (
+            "[hosts]\n\"https://user:secret=secretpw@github.com\" = 5",
+            "line 2 (`\"https://…@github.com\"`)",
+        ),
+        (
+            "[hosts]\n\"https://user:se\\\"cret=secretpw@github.com\" = 5",
+            "line 2 (`\"https://…@github.com\"`)",
+        ),
+        (
+            "[hosts.\"https://user:secret=secretpw@github.com\"]",
+            "line 1, column 1: missing field `token`",
         ),
     ];
     for (config, expected) in cases {
