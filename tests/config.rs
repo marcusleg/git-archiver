@@ -74,19 +74,19 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
         ),
         (
             "[hosts.\"github.com\"]\ntoken = \"\"",
-            "`hosts.\"github.com\".token` must not be empty",
+            "`hosts.….token` must not be empty",
         ),
         (
             "[hosts.\"github.com\"]\ntoken = \"ghp_x\\nurl=https://evil\"",
-            "`hosts.\"github.com\".token` must not be empty or contain spaces",
+            "`hosts.….token` must not be empty or contain spaces",
         ),
         (
             "[hosts.\"github.com\"]\ntokn = \"x\"",
-            "line 2 (`hosts.\"github.com\".…`), column 1: unknown field `…`, expected `token`",
+            "line 2 (`hosts.….…`), column 1: unknown field `…`, expected `token`",
         ),
         (
             "[hosts.\"https://github.com\"]\ntoken = \"x\"",
-            "`hosts` key \"https://github.com\" must be a host",
+            "`hosts` key must be a host",
         ),
         (
             "[hosts.\"github.com\"]\ntoken = \"x\"\n[hosts.\"GitHub.com\"]\ntoken = \"y\"",
@@ -161,11 +161,10 @@ async fn every_config_error_shows_where_and_what_but_nothing_the_user_wrote() {
     let escapes =
         r#"missing escaped value, expected `b`, `e`, `f`, `n`, `r`, `\`, `"`, `x`, `u`, `U`"#;
     let cases: Vec<(&str, String)> = vec![
-        // A rejected `repos` entry is named from its parsed URL, or else by
-        // its position.
+        // A rejected `repos` entry is named by its position only.
         (
             r#"repos = ["https://user:secretpw@example.com/foo/bar"]"#,
-            r#"line 1, column 10: `repos` entry "https://…@example.com/foo/bar" must not contain credentials; set a token under [hosts."<host>"] instead"#.into(),
+            r#"line 1, column 10: `repos` entry 1 must not contain credentials; set a token under [hosts."<host>"] instead"#.into(),
         ),
         (
             r#"repos = ["https://user:secretpw@example.com:99999/foo/bar"]"#,
@@ -177,7 +176,7 @@ async fn every_config_error_shows_where_and_what_but_nothing_the_user_wrote() {
         ),
         (
             r#"repos = ["https://example.com/secretpw/b", "ftp://user:secretpw@example.com/foo/bar"]"#,
-            r#"line 1, column 44: `repos` entry "…://…@example.com/foo/bar" must be an http:// or https:// URL"#.into(),
+            r#"line 1, column 44: `repos` entry 2 must be an http:// or https:// URL"#.into(),
         ),
         (
             r#"repos = ["user:secretpw@example.com/foo/bar"]"#,
@@ -189,23 +188,35 @@ async fn every_config_error_shows_where_and_what_but_nothing_the_user_wrote() {
         ),
         (
             r#"repos = ["user://secretpw@github.com/foo/bar"]"#,
-            r#"line 1, column 10: `repos` entry "…://…@github.com/foo/bar" must be an http:// or https:// URL"#.into(),
+            r#"line 1, column 10: `repos` entry 1 must be an http:// or https:// URL"#.into(),
         ),
-        // A rejected `hosts` key likewise.
+        (
+            r#"repos = ["ftp://ghp_secretpw/foo/bar"]"#,
+            "line 1, column 10: `repos` entry 1 must be an http:// or https:// URL".into(),
+        ),
+        // A rejected `hosts` key is not named at all.
         (
             "[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
-            format!(r#"line 1, column 8: `hosts` key "https://…@github.com" {host}"#),
+            format!(r#"line 1, column 8: `hosts` key {host}"#),
         ),
         (
             "[hosts]\n\"https://user:secretpw@github.com\" = { token = \"ghp_secretpw\" }",
-            format!(r#"line 2, column 1: `hosts` key "https://…@github.com" {host}"#),
+            format!(r#"line 2, column 1: `hosts` key {host}"#),
         ),
         (
             "[hosts.\"user://secretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
-            format!(r#"line 1, column 8: `hosts` key "…://…@github.com" {host}"#),
+            format!(r#"line 1, column 8: `hosts` key {host}"#),
         ),
         (
             "[hosts.\"user:se://cretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 8: `hosts` key {host}"),
+        ),
+        (
+            "[hosts.\"https://ghp_secretpw\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 8: `hosts` key {host}"),
+        ),
+        (
+            "[hosts.\"http://glpat-secretpw:443\"]\ntoken = \"ghp_secretpw\"",
             format!("line 1, column 8: `hosts` key {host}"),
         ),
         // A `hosts` key shaped like a host but holding credentials.
@@ -223,7 +234,7 @@ async fn every_config_error_shows_where_and_what_but_nothing_the_user_wrote() {
         ),
         (
             "[hosts.\"[::1]:8080\"]\ntoken = \"ghp_secretpw x\"",
-            r#"line 2, column 9: `hosts."[::1]:8080".token` must not be empty or contain spaces, line breaks or control characters"#.into(),
+            r#"line 2, column 9: `hosts.….token` must not be empty or contain spaces, line breaks or control characters"#.into(),
         ),
         // A token that isn't a string, or a table without one.
         (
@@ -248,11 +259,11 @@ async fn every_config_error_shows_where_and_what_but_nothing_the_user_wrote() {
         ),
         (
             "[hosts]\n\"github.com\" = \"ghp_secretpw\"\n",
-            r#"line 2 (`hosts."github.com"`), column 16: invalid type: string "…", expected struct HostConfig"#.into(),
+            r#"line 2 (`hosts.…`), column 16: invalid type: string "…", expected struct HostConfig"#.into(),
         ),
         (
             "[hosts]\n\"github.com\" = \"ghp_\\\"secretpw`ab`cd\"\n",
-            r#"line 2 (`hosts."github.com"`), column 16: invalid type: string "…", expected struct HostConfig"#.into(),
+            r#"line 2 (`hosts.…`), column 16: invalid type: string "…", expected struct HostConfig"#.into(),
         ),
         (
             "repos = \"https://user:ghp_\\\"secretpw`x`pw@github.com\"\n",
@@ -298,37 +309,37 @@ async fn every_config_error_shows_where_and_what_but_nothing_the_user_wrote() {
             r#"[hosts."github.com"]
 token = "ghp_secretpw"
 "https://user:secretpw@github.com" = "ghp_secretpw""#,
-            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+            r#"line 3 (`hosts.….…`), column 1: unknown field `…`, expected `token`"#.into(),
         ),
         (
             r#"[hosts."github.com"]
 token = "ghp_secretpw"
 "https://user:secretpw\u0040github.com" = "ghp_secretpw""#,
-            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+            r#"line 3 (`hosts.….…`), column 1: unknown field `…`, expected `token`"#.into(),
         ),
         (
             r#"[hosts."github.com"]
 token = "ghp_secretpw"
 "https://user:secret\"pw@github.com" = "ghp_secretpw""#,
-            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+            r#"line 3 (`hosts.….…`), column 1: unknown field `…`, expected `token`"#.into(),
         ),
         (
             r#"[hosts."github.com"]
 token = "ghp_secretpw"
 'https://user:secret"pw@github.com' = "ghp_secretpw""#,
-            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+            r#"line 3 (`hosts.….…`), column 1: unknown field `…`, expected `token`"#.into(),
         ),
         (
             r#"[hosts."github.com"]
 token = "ghp_secretpw"
 'https://user:secretpw"@"github.com' = "ghp_secretpw""#,
-            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+            r#"line 3 (`hosts.….…`), column 1: unknown field `…`, expected `token`"#.into(),
         ),
         (
             r#"[hosts."github.com"]
 token = "ghp_secretpw"
 "https://user:sec`ret, expected `token` pw@github.com" = "ghp_secretpw""#,
-            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+            r#"line 3 (`hosts.….…`), column 1: unknown field `…`, expected `token`"#.into(),
         ),
         (
             "[\"https://user:secretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
@@ -358,10 +369,9 @@ token = "ghp_secretpw"
         // secret; its value is not.
         (
             "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\"\ninterval = \"ghp_secretpw\"",
-            r#"line 3 (`hosts."github.com".interval`), column 1: unknown field `interval`, expected `token`"#.into(),
+            r#"line 3 (`hosts.….interval`), column 1: unknown field `interval`, expected `token`"#.into(),
         ),
-        // A token written as a key, or as a `hosts` key, which an error
-        // names only if it looks like a domain name.
+        // A token written as a key, or as a `hosts` key.
         (
             "[hosts]\nghp_secretpw = \"ghp_secretpw\"",
             r#"line 2 (`hosts.…`), column 16: invalid type: string "…", expected struct HostConfig"#.into(),
@@ -384,7 +394,7 @@ token = "ghp_secretpw"
         ),
         (
             "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\"\nghp_secretpw = \"ghp_secretpw\"",
-            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+            r#"line 3 (`hosts.….…`), column 1: unknown field `…`, expected `token`"#.into(),
         ),
         (
             "ghp_secretpw = \"ghp_secretpw\"",
@@ -444,11 +454,11 @@ token = "ghp_secretpw"
         ),
         (
             "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw x\"",
-            r#"line 2, column 9: `hosts."github.com".token` must not be empty or contain spaces, line breaks or control characters"#.into(),
+            r#"line 2, column 9: `hosts.….token` must not be empty or contain spaces, line breaks or control characters"#.into(),
         ),
         (
             "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\"\n[hosts.\"GitHub.com\"]\ntoken = \"ghp_secretpw\"",
-            r#"line 3, column 8: `hosts` lists "GitHub.com" more than once (host names ignore case)"#.into(),
+            r#"line 3, column 8: `hosts` lists a host more than once (host names ignore case)"#.into(),
         ),
     ];
     for (config, expected) in &cases {
@@ -494,57 +504,43 @@ async fn assert_start_error(config: &str, expected: &str) {
 }
 
 #[tokio::test]
-async fn an_error_names_a_hosts_key_only_if_it_looks_like_a_domain_name() {
-    // Each host, as the key in an error shows it, and as the duplicate-host
-    // error names it when the host is listed again in upper case. A host
-    // without letters can't be.
-    let cases = [
-        ("github.com", r#""github.com""#, Some(r#""GITHUB.COM""#)),
-        ("GitHub.com", r#""GitHub.com""#, Some(r#""GITHUB.COM""#)),
-        ("localhost", "localhost", Some(r#""LOCALHOST""#)),
-        (
-            "localhost:3000",
-            r#""localhost:3000""#,
-            Some(r#""LOCALHOST:3000""#),
-        ),
-        (
-            "git.example.com:8443",
-            r#""git.example.com:8443""#,
-            Some(r#""GIT.EXAMPLE.COM:8443""#),
-        ),
-        ("[::1]", r#""[::1]""#, None),
-        ("[::1]:8080", r#""[::1]:8080""#, None),
-        ("ghp_secretpw", "…", Some("a host")),
-        ("glpat-secretpw", "…", Some("a host")),
-        ("gitea", "…", Some("a host")),
-        ("secretpw:443", "…", Some("a host")),
+async fn an_error_never_names_a_hosts_key() {
+    let hosts = [
+        "github.com",
+        "GitHub.com",
+        "localhost",
+        "localhost:3000",
+        "git.example.com:8443",
+        "[::1]",
+        "[::1]:8080",
+        "ghp_secretpw",
+        "glpat-secretpw",
+        "gitea",
+        "secretpw:443",
         // A host named like one of the app's settings is still a host.
-        ("token", "…", Some("a host")),
+        "token",
     ];
-    for (host, shown, named_twice) in cases {
+    for host in hosts {
         assert_start_error(
             &format!("[hosts.\"{host}\"]"),
-            &format!("line 1 (`hosts.{shown}`), column 1: missing field `token`"),
+            "line 1 (`hosts.…`), column 1: missing field `token`",
         )
         .await;
         assert_start_error(
             &format!("[hosts.\"{host}\"]\ntoken = \"ghp_secretpw x\""),
-            &format!(
-                "line 2, column 9: `hosts.{shown}.token` must not be empty or contain spaces, \
-                 line breaks or control characters"
-            ),
+            "line 2, column 9: `hosts.….token` must not be empty or contain spaces, \
+             line breaks or control characters",
         )
         .await;
-        if let Some(named) = named_twice {
-            let upper = host.to_ascii_uppercase();
+        // Listed again in upper case, which only a host with letters can be.
+        let upper = host.to_ascii_uppercase();
+        if upper != host {
             assert_start_error(
                 &format!(
                     "[hosts.\"{host}\"]\ntoken = \"ghp_secretpw\"\n\
                      [hosts.\"{upper}\"]\ntoken = \"ghp_secretpw\""
                 ),
-                &format!(
-                    "line 3, column 8: `hosts` lists {named} more than once (host names ignore case)"
-                ),
+                "line 3, column 8: `hosts` lists a host more than once (host names ignore case)",
             )
             .await;
         }

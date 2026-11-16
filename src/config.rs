@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -148,9 +148,8 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
 /// The config a file's text holds. Every config error is shown from here.
 /// It goes to the startup error, the log and the list page, which anyone
 /// can read, and anything the user wrote may be a credential, so the error
-/// is built from text the app knows, plus only what of the file the app has
-/// checked: hosts as [`shown_host`] names them and URLs as [`shown_url`]
-/// names them. See [`ConfigError`].
+/// is built only from text the app knows and quotes nothing from the file
+/// (ADR 0003). See [`ConfigError`].
 fn parse(text: &str) -> anyhow::Result<Config> {
     check(text).map_err(|error| anyhow::anyhow!(error.shown(text)))
 }
@@ -225,7 +224,7 @@ impl ConfigError {
     }
 
     /// The error as the app shows it, such as
-    /// ``line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token` ``,
+    /// ``line 3 (`hosts.….…`), column 1: unknown field `…`, expected `token` ``,
     /// with the line and column counted in `text`, the file it was found in.
     fn shown(&self, text: &str) -> String {
         let Some(span) = &self.span else {
@@ -278,24 +277,20 @@ const TOML_TOKENS: [&str; 30] = [
     "0o", "0x", "b", "e", "f", "n", "r", "u", "U", "x", "true", "false", "inf", "nan",
 ];
 
-/// A key as an error may show it, such as `hosts."github.com".…`: each part
-/// that is one of the app's own names, or a `hosts` key that [`shown_host`]
-/// names, and `…` for any other part, which may be a credential. None if no
-/// part may be shown.
+/// A key as an error may show it, such as `hosts.….token`: each part that is
+/// one of the app's own names, and `…` for any other part, which may be a
+/// credential. None if no part may be shown.
 fn shown_key(path: &[&str]) -> Option<String> {
     let mut any_shown = false;
-    let parts: Vec<String> = path
+    let parts: Vec<&str> = path
         .iter()
         .enumerate()
         .map(|(i, &part)| {
             // A `hosts` key is a host, whatever it's called.
-            let shown = if i == 1 && path[0] == "hosts" {
-                shown_host(part)
-            } else {
-                APP_NAMES.contains(&part).then(|| part.to_owned())
-            };
-            any_shown |= shown.is_some();
-            shown.unwrap_or_else(|| "…".to_owned())
+            let is_host = i == 1 && path[0] == "hosts";
+            let shown = !is_host && APP_NAMES.contains(&part);
+            any_shown |= shown;
+            if shown { part } else { "…" }
         })
         .collect();
     any_shown.then(|| parts.join("."))
@@ -368,47 +363,15 @@ fn check_interval(text: &Spanned<String>) -> Result<Duration, ConfigError> {
 }
 
 /// The `repos` entry at `position`, counting from 1, if the config would
-/// accept it.
+/// accept it. An error names the entry by its position only.
 fn check_repo_entry(position: usize, repo: Spanned<String>) -> Result<String, ConfigError> {
     if let Err(problem) = check_repo_url(repo.get_ref()) {
-        let name =
-            shown_url(repo.get_ref()).map_or(position.to_string(), |name| format!("{name:?}"));
         return Err(ConfigError::at(
             &repo,
-            format!("`repos` entry {name} {problem}"),
+            format!("`repos` entry {position} {problem}"),
         ));
     }
     Ok(repo.into_inner())
-}
-
-/// How an error names a `repos` entry or `hosts` key it rejects: from the
-/// URL the text parses as, with `…` for its user info and for a scheme the
-/// app doesn't support, and without its query or fragment, such as
-/// `https://…@github.com/foo/bar`. None if the text doesn't parse as a URL
-/// with a host, or if an `@` follows the host, as it does when a `#`, `/` or
-/// `?` in a password ends the user info early and leaves the rest of it in
-/// the host and path.
-fn shown_url(text: &str) -> Option<String> {
-    let url = url::Url::parse(text).ok()?;
-    let host = url.host_str().filter(|host| !host.is_empty())?;
-    if url[url::Position::BeforePath..].contains('@') {
-        return None;
-    }
-    let scheme = match url.scheme() {
-        scheme @ ("http" | "https") => scheme,
-        _ => "…",
-    };
-    let user_info = if url.username().is_empty() && url.password().is_none() {
-        ""
-    } else {
-        "…@"
-    };
-    let port = url
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    let path = url.path().trim_end_matches('/');
-    Some(format!("{scheme}://{user_info}{host}{port}{path}"))
 }
 
 /// The repo's identity if the config would accept this URL; otherwise why
@@ -756,26 +719,20 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The name in a `hosts` key that is a host, without its port.
-enum HostName<'a> {
-    /// What the brackets hold, such as `::1` in `[::1]:8080`.
-    Bracketed(&'a str),
-    /// Such as `github.com` in `github.com:443`.
-    Plain(&'a str),
-}
-
-/// The name in a `hosts` key, if the key is a host, with a port if it names
-/// one, such as `github.com`, `localhost:3000` or `[::1]:8080`. Only a port
-/// follows a `:`, so a key such as `user:password` is no host.
-fn host_name(key: &str) -> Option<HostName<'_>> {
-    let (name, port) = match key.strip_prefix('[') {
+/// Whether a `hosts` key is a host, with a port if it names one, such as
+/// `github.com`, `localhost:3000` or `[::1]:8080`. Only a port follows a
+/// `:`, so a key such as `user:password` is no host.
+fn is_host(key: &str) -> bool {
+    let (name_ok, port) = match key.strip_prefix('[') {
         Some(bracketed) => {
-            let (ip, port) = bracketed.split_once(']')?;
+            let Some((ip, port)) = bracketed.split_once(']') else {
+                return false;
+            };
             let ip_ok = !ip.is_empty()
                 && ip
                     .chars()
                     .all(|c| c.is_ascii_hexdigit() || ":.".contains(c));
-            (ip_ok.then_some(HostName::Bracketed(ip)), port)
+            (ip_ok, port)
         }
         None => {
             let (name, port) = key.split_at(key.find(':').unwrap_or(key.len()));
@@ -783,52 +740,19 @@ fn host_name(key: &str) -> Option<HostName<'_>> {
                 && name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c));
-            (name_ok.then_some(HostName::Plain(name)), port)
+            (name_ok, port)
         }
     };
     let port_ok = port.is_empty()
         || port
             .strip_prefix(':')
             .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
-    name.filter(|_| port_ok)
-}
-
-/// Whether a `hosts` key is a host, as [`host_name`] reads it.
-fn is_host(key: &str) -> bool {
-    host_name(key).is_some()
-}
-
-/// Whether an error may name a `hosts` key. [`is_host`] accepts any run of
-/// letters, digits, `.`, `-` and `_`, which is also the shape of a bare
-/// token such as `ghp_…` or `glpat-…`, so the key must be a host whose name
-/// has a `.`, which no token format in use holds, or is `localhost` or a
-/// bracketed IPv6 address.
-fn may_name_host(key: &str) -> bool {
-    match host_name(key) {
-        Some(HostName::Bracketed(ip)) => ip.parse::<Ipv6Addr>().is_ok(),
-        Some(HostName::Plain(name)) => name.contains('.') || name.eq_ignore_ascii_case("localhost"),
-        None => false,
-    }
-}
-
-/// A `hosts` key as an error may name it, as a toml key: quoted unless it's
-/// a bare key. None unless [`may_name_host`]. A host holds no `"` or `\`
-/// that quoting would need to escape.
-fn shown_host(key: &str) -> Option<String> {
-    if !may_name_host(key) {
-        None
-    } else if key
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
-    {
-        Some(key.to_owned())
-    } else {
-        Some(format!("\"{key}\""))
-    }
+    name_ok && port_ok
 }
 
 /// The tokens by host, if every `hosts` key is a host, listed once, with a
-/// well-formed token.
+/// well-formed token. An error never names the host: its line and column
+/// say which.
 fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, ConfigError> {
     let mut hosts: Vec<_> = hosts.into_iter().collect();
     // In file order, so a host listed twice is reported where it repeats.
@@ -836,25 +760,17 @@ fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, C
     let mut tokens = BTreeMap::new();
     for (host, settings) in hosts {
         if !is_host(host.get_ref()) {
-            let name = shown_url(host.get_ref())
-                .map(|name| format!("{name:?} "))
-                .unwrap_or_default();
             return Err(ConfigError::at(
                 &host,
-                format!(
-                    "`hosts` key {name}must be a host such as \"github.com\", \
-                     with a port if the repo URLs name one"
-                ),
+                "`hosts` key must be a host such as \"github.com\", \
+                 with a port if the repo URLs name one",
             ));
         }
         if settings.token.get_ref().is_malformed() {
             return Err(ConfigError::at(
                 &settings.token,
-                format!(
-                    "`hosts.{}.token` must not be empty or contain spaces, \
-                     line breaks or control characters",
-                    shown_host(host.get_ref()).as_deref().unwrap_or("…")
-                ),
+                "`hosts.….token` must not be empty or contain spaces, \
+                 line breaks or control characters",
             ));
         }
         let lowercased = host.get_ref().to_ascii_lowercase();
@@ -862,15 +778,9 @@ fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, C
             .insert(lowercased, settings.token.into_inner())
             .is_some()
         {
-            // The line and column say which host, if it may not be named.
-            let named = if may_name_host(host.get_ref()) {
-                format!("{:?}", host.get_ref())
-            } else {
-                "a host".to_owned()
-            };
             return Err(ConfigError::at(
                 &host,
-                format!("`hosts` lists {named} more than once (host names ignore case)"),
+                "`hosts` lists a host more than once (host names ignore case)",
             ));
         }
     }
