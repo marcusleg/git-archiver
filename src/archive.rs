@@ -22,6 +22,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::identity::RepoId;
+use crate::state::Status;
 
 const STAGING: &str = "refs/staging/";
 
@@ -51,6 +52,14 @@ pub enum FetchError {
 }
 
 impl FetchError {
+    /// The status this failure gives the repo.
+    pub fn status(&self) -> Status {
+        match self {
+            Self::Unavailable { .. } => Status::Unavailable,
+            Self::Failed { .. } => Status::FetchFailed,
+        }
+    }
+
     pub fn reason(&self) -> &str {
         match self {
             Self::Unavailable { reason, .. } | Self::Failed { reason } => reason,

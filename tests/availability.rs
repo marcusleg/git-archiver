@@ -6,6 +6,8 @@ mod common;
 
 use common::forge::{DMCA_MESSAGE, DMCA_NOTICE, Failure, FakeForge, Upstream};
 use common::git::{has_object, refs};
+use std::path::PathBuf;
+
 use common::{HOUR, TestApp, logs};
 use scraper::{ElementRef, Html, Selector};
 
@@ -54,18 +56,31 @@ async fn status_view(app: &TestApp) -> StatusView {
     }
 }
 
+/// A repo archived by the app.
+struct Archived {
+    upstream: Upstream,
+    app: TestApp,
+    /// The repo identity.
+    id: String,
+    archive: PathBuf,
+}
+
 /// A repo with a commit and a tag, archived by the app 24 hours after start
 /// (2026-11-17 12:00 UTC). Upstream then gets another commit, so a fetch
 /// that went through would change the archive.
-async fn archived_repo(forge: &FakeForge) -> (Upstream, TestApp, String) {
+async fn archived_repo(forge: &FakeForge) -> Archived {
     let upstream = forge.create_repo("foo/bar");
     upstream.commit("first");
     upstream.tag("v1");
     let app = TestApp::tracking(&[upstream.url()]).await;
     app.advance_and_settle(24 * HOUR).await;
     upstream.commit("second");
-    let id = format!("http://{}/foo/bar", forge.host());
-    (upstream, app, id)
+    Archived {
+        id: format!("http://{}/foo/bar", forge.host()),
+        archive: app.archive(&format!("{}/foo/bar", forge.host())),
+        upstream,
+        app,
+    }
 }
 
 /// Refuses the archived repo the given way at the next fetch (2026-11-18
@@ -73,8 +88,9 @@ async fn archived_repo(forge: &FakeForge) -> (Upstream, TestApp, String) {
 /// archive as it was.
 async fn assert_refusal_marks_unavailable(failure: Failure, http_status: u16, message: &[&str]) {
     let forge = FakeForge::start().await;
-    let (_upstream, app, id) = archived_repo(&forge).await;
-    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    let Archived {
+        app, id, archive, ..
+    } = archived_repo(&forge).await;
     let before = refs(&archive);
 
     forge.fail("foo/bar", failure);
@@ -152,8 +168,9 @@ async fn assert_fetch_failed(app: &TestApp, error: &str) {
 #[tokio::test]
 async fn a_server_error_upstream_is_a_failed_fetch() {
     let forge = FakeForge::start().await;
-    let (_upstream, app, id) = archived_repo(&forge).await;
-    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    let Archived {
+        app, id, archive, ..
+    } = archived_repo(&forge).await;
     let before = refs(&archive);
 
     forge.fail("foo/bar", Failure::ServerError);
@@ -167,8 +184,9 @@ async fn a_server_error_upstream_is_a_failed_fetch() {
 #[tokio::test]
 async fn a_refused_connection_is_a_failed_fetch() {
     let forge = FakeForge::start().await;
-    let (_upstream, app, id) = archived_repo(&forge).await;
-    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    let Archived {
+        app, id, archive, ..
+    } = archived_repo(&forge).await;
     let before = refs(&archive);
 
     forge.go_offline().await;
@@ -182,8 +200,9 @@ async fn a_refused_connection_is_a_failed_fetch() {
 #[tokio::test]
 async fn a_fetch_hanging_past_the_timeout_is_a_failed_fetch() {
     let forge = FakeForge::start().await;
-    let (_upstream, app, id) = archived_repo(&forge).await;
-    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    let Archived {
+        app, id, archive, ..
+    } = archived_repo(&forge).await;
     let before = refs(&archive);
 
     forge.hang("foo/bar");
@@ -214,7 +233,7 @@ async fn a_repo_refused_on_its_first_fetch_gets_no_archive() {
 #[tokio::test]
 async fn unavailable_since_keeps_the_time_of_the_first_refusal() {
     let forge = FakeForge::start().await;
-    let (_upstream, mut app, id) = archived_repo(&forge).await;
+    let Archived { mut app, id, .. } = archived_repo(&forge).await;
     forge.fail("foo/bar", Failure::DmcaTakedown);
     app.advance_and_settle(24 * HOUR).await;
 
@@ -242,8 +261,12 @@ async fn unavailable_since_keeps_the_time_of_the_first_refusal() {
 #[tokio::test]
 async fn a_restored_repo_is_available_again_and_keeps_its_pre_takedown_history() {
     let forge = FakeForge::start().await;
-    let (upstream, app, id) = archived_repo(&forge).await;
-    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    let Archived {
+        upstream,
+        app,
+        id,
+        archive,
+    } = archived_repo(&forge).await;
     let old_tip = refs(&archive)["refs/heads/main"].clone();
     forge.fail("foo/bar", Failure::DmcaTakedown);
     app.advance_and_settle(24 * HOUR).await;
@@ -272,7 +295,7 @@ async fn a_restored_repo_is_available_again_and_keeps_its_pre_takedown_history()
 async fn every_status_change_logs_one_line_with_the_old_and_new_status_and_the_reason() {
     let logs = logs::capture();
     let forge = FakeForge::start().await;
-    let (_upstream, app, id) = archived_repo(&forge).await;
+    let Archived { app, id, .. } = archived_repo(&forge).await;
 
     forge.fail("foo/bar", Failure::DmcaTakedown);
     app.advance_and_settle(24 * HOUR).await;

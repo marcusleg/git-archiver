@@ -99,45 +99,36 @@ impl Scheduler {
         let state = {
             let mut overview = self.overview.lock().unwrap();
             overview.last_fetch_duration = Some(duration);
-            match &result {
-                Ok(()) => {}
-                Err(FetchError::Unavailable { .. }) => overview.fetch_errors.unavailable += 1,
-                Err(FetchError::Failed { .. }) => overview.fetch_errors.fetch_failed += 1,
+            if let Err(e) = &result {
+                overview.fetch_errors.count(e.status());
             }
             let entry = overview.state.repos.entry(repo.id.to_string()).or_default();
             entry.record_attempt(attempt, size);
-            let previous = entry.record_result(attempt, &result);
-            let from = |previous: Option<Status>| previous.map_or("none", Status::as_str);
-            match &result {
-                Ok(()) => {
-                    if let Some(previous) = previous {
-                        tracing::info!(
-                            repo = %repo.id,
-                            from = %from(previous),
-                            to = %Status::Available.as_str(),
-                            "status changed",
-                        );
-                    }
-                    tracing::info!(repo = %repo.id, duration_ms = duration.as_millis(), "fetched");
-                }
-                Err(e) => {
-                    let to = entry.status.expect("a result sets the status");
-                    match previous {
-                        Some(previous) => tracing::warn!(
-                            repo = %repo.id,
-                            from = %from(previous),
-                            to = %to.as_str(),
-                            reason = e.reason(),
-                            "status changed",
-                        ),
-                        None => tracing::warn!(
-                            repo = %repo.id,
-                            status = %to.as_str(),
-                            reason = e.reason(),
-                            "fetch unsuccessful",
-                        ),
-                    }
-                }
+            let change = entry.record_result(attempt, &result);
+            match (&result, change) {
+                (Ok(()), Some(change)) => tracing::info!(
+                    repo = %repo.id,
+                    from = %change.from.map_or("none", Status::as_str),
+                    to = %change.to.as_str(),
+                    "status changed",
+                ),
+                (Err(e), Some(change)) => tracing::warn!(
+                    repo = %repo.id,
+                    from = %change.from.map_or("none", Status::as_str),
+                    to = %change.to.as_str(),
+                    reason = e.reason(),
+                    "status changed",
+                ),
+                (Err(e), None) => tracing::warn!(
+                    repo = %repo.id,
+                    status = %e.status().as_str(),
+                    reason = e.reason(),
+                    "status unchanged",
+                ),
+                (Ok(()), None) => {}
+            }
+            if result.is_ok() {
+                tracing::info!(repo = %repo.id, duration_ms = duration.as_millis(), "fetched");
             }
             overview.state.clone()
         };
