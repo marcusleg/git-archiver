@@ -3,7 +3,7 @@
 mod common;
 
 use common::forge::{DMCA_MESSAGE, DMCA_NOTICE, Failure, FakeForge};
-use common::{HOUR, Page, TestApp, config_tracking};
+use common::{HOUR, Page, TestApp, last_successes, three_repos, urls};
 use scraper::{Html, Selector};
 
 fn select<'a>(html: &'a Html, selector: &str) -> Vec<scraper::ElementRef<'a>> {
@@ -358,43 +358,26 @@ async fn nothing_is_added_while_the_config_file_is_invalid() {
 #[tokio::test]
 async fn adding_a_repo_counts_as_its_first_attempt_and_the_gap_reflects_the_new_count() {
     let forge = FakeForge::start().await;
-    let repos: Vec<_> = ["a/one", "a/two", "a/three"]
-        .iter()
-        .map(|path| {
-            let upstream = forge.create_repo(path);
-            upstream.commit("first");
-            upstream
-        })
-        .collect();
-    let ids: Vec<String> = ["a/one", "a/two", "a/three"]
-        .iter()
-        .map(|path| format!("http://{}/{path}", forge.host()))
-        .collect();
-    let app = TestApp::with_config(&config_tracking(&[repos[0].url(), repos[1].url()])).await;
+    let (repos, ids) = three_repos(&forge);
+    let app = TestApp::tracking(&urls(&repos[..2])).await;
     let start = app.now();
     let h = |hours: u64| Some(start + hours * 3600);
-    let last_successes = async || {
-        let metrics = app.metrics().await;
-        ids.iter()
-            .map(|id| metrics.last_success(id))
-            .collect::<Vec<_>>()
-    };
     app.advance_and_settle(12 * HOUR).await;
     app.advance_and_settle(2 * HOUR).await;
-    assert_eq!(last_successes().await, [h(12), None, None]);
+    assert_eq!(last_successes(&app, &ids).await, [h(12), None, None]);
 
     app.add_repo(repos[2].url()).await;
     app.settle().await;
 
-    assert_eq!(last_successes().await, [h(12), None, h(14)]);
-    let next = app
-        .metrics()
-        .await
-        .value("archiver_next_fetch_timestamp_seconds", &[]);
-    assert_eq!(next, h(22).map(|t| t as f64), "24h / 3 after the clone");
+    assert_eq!(last_successes(&app, &ids).await, [h(12), None, h(14)]);
+    assert_eq!(
+        app.next_fetch().await,
+        h(22).map(|t| t as f64),
+        "24h / 3 after the clone"
+    );
 
     app.advance_and_settle(8 * HOUR).await;
-    assert_eq!(last_successes().await, [h(12), h(22), h(14)]);
+    assert_eq!(last_successes(&app, &ids).await, [h(12), h(22), h(14)]);
 }
 
 #[tokio::test]
