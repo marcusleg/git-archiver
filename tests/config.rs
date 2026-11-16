@@ -128,6 +128,34 @@ async fn a_rejected_repo_url_is_named_without_its_credentials() {
 }
 
 #[tokio::test]
+async fn a_rejected_hosts_key_is_named_without_its_credentials() {
+    let cases = [
+        (
+            "[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"x\"",
+            "`hosts` key \"https://…@github.com\" must be a host",
+        ),
+        (
+            "[hosts]\n\"https://user:secretpw@github.com\" = { token = \"x\" }",
+            "`hosts` key \"https://…@github.com\" must be a host",
+        ),
+        (
+            "[hosts]\n\"https://user:secretpw@github.com\" = \"x\"",
+            "line 2",
+        ),
+        (
+            "hosts.\"https://user:secretpw@github.com\".token = 5",
+            "line 1",
+        ),
+    ];
+    for (config, expected) in cases {
+        let error = TestApp::start_error(config).await;
+        assert!(error.contains(expected), "{config:?}: {error}");
+        assert!(!error.contains("secretpw"), "{config:?}: {error}");
+        assert!(!error.contains("user:"), "{config:?}: {error}");
+    }
+}
+
+#[tokio::test]
 async fn an_invalid_config_names_where_without_ever_quoting_a_token() {
     let cases = [
         (

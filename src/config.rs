@@ -173,7 +173,7 @@ fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let line = text[line_start..].lines().next().unwrap_or_default();
     let place = match line.split_once('=') {
         Some((key, _)) if !key.trim().is_empty() => {
-            format!("line {line_number} (`{}`)", key.trim())
+            format!("line {line_number} (`{}`)", hide_credentials(key.trim()))
         }
         _ => format!("line {line_number}"),
     };
@@ -215,19 +215,19 @@ fn validate_repo_url(repo: String) -> anyhow::Result<String> {
 }
 
 /// The URL as written, with everything between the scheme and the last `@`
-/// replaced by `…`, so a rejection can name the entry without showing a
-/// credential in the UI or the log. Any user name and password end at an
-/// `@`, so cutting up to the last one also covers a URL that a parser reads
-/// differently than its author meant, such as one whose unencoded password
-/// holds a `#`.
-fn hide_credentials(repo: &str) -> String {
-    let (scheme, rest) = match repo.split_once("://") {
+/// replaced by `…`, so a rejection can name a repo entry or `hosts` key, or
+/// the key on a line, without showing a credential in the UI or the log. Any
+/// user name and password end at an `@`, so cutting up to the last one also
+/// covers a URL that a parser reads differently than its author meant, such
+/// as one whose unencoded password holds a `#`.
+fn hide_credentials(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
-        None => (String::new(), repo),
+        None => (String::new(), url),
     };
     match rest.rfind('@') {
         Some(at) => format!("{scheme}…{}", &rest[at..]),
-        None => repo.to_owned(),
+        None => url.to_owned(),
     }
 }
 
@@ -584,8 +584,9 @@ fn validate_hosts(hosts: BTreeMap<String, HostConfig>) -> anyhow::Result<Tokens>
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || ".-_:[]".contains(c));
         if !valid {
+            let shown = hide_credentials(&host);
             bail!(
-                "`hosts` key {host:?} must be a host such as \"github.com\", \
+                "`hosts` key {shown:?} must be a host such as \"github.com\", \
                  with a port if the repo URLs name one"
             );
         }
