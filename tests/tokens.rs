@@ -31,6 +31,15 @@ fn assert_hidden(text: &str, token: &str, place: &str) {
     assert!(!text.contains(token), "token leaked into {place}: {text}");
 }
 
+/// Fails if `token` appears on the list page, in `/metrics` or in
+/// `state.json`.
+async fn assert_hidden_by_app(app: &TestApp, token: &str) {
+    assert_hidden(&app.get("/").await.text(), token, "the list page");
+    assert_hidden(&app.metrics().await.text, token, "/metrics");
+    let state = std::fs::read_to_string(app.data_dir().join("state.json")).unwrap();
+    assert_hidden(&state, token, "state.json");
+}
+
 /// Fails if `token`, or any `Authorization` header, appears in any file
 /// under `dir`.
 fn assert_hidden_in_files(dir: &Path, token: &str) {
@@ -69,10 +78,7 @@ async fn a_repo_that_requires_a_token_is_fetched_with_the_configured_token() {
         Some(start + 24 * 3600)
     );
 
-    assert_hidden(&app.get("/").await.text(), TOKEN, "the list page");
-    assert_hidden(&metrics.text, TOKEN, "/metrics");
-    let state = std::fs::read_to_string(app.data_dir().join("state.json")).unwrap();
-    assert_hidden(&state, TOKEN, "state.json");
+    assert_hidden_by_app(&app, TOKEN).await;
     assert_hidden_in_files(&app.data_dir().join("repos"), TOKEN);
 }
 
@@ -129,6 +135,67 @@ async fn repos_on_other_hosts_are_fetched_without_the_token() {
 }
 
 #[tokio::test]
+async fn the_token_isnt_sent_to_another_host_upstream_redirects_to() {
+    let with_token = FakeForge::start().await;
+    let other = FakeForge::start().await;
+    let moved = with_token.create_repo("old/name");
+    let target = other.create_repo("new/name");
+    let tip = target.commit("first");
+    with_token.redirect("old/name", &target);
+    let app = TestApp::with_config(&config_with_token(
+        &[moved.url()],
+        &with_token.host(),
+        TOKEN,
+    ))
+    .await;
+
+    app.advance_and_settle(24 * HOUR).await;
+
+    assert_eq!(other.authorizations(), Vec::<String>::new());
+    let archive = app.archive(&format!("{}/old/name", with_token.host()));
+    assert_eq!(refs(&archive)["refs/heads/main"], tip);
+}
+
+#[tokio::test]
+async fn a_repo_moved_within_its_host_is_still_fetched_with_the_token() {
+    let forge = FakeForge::start().await;
+    forge.require_token(TOKEN);
+    let moved = forge.create_repo("old/name");
+    let target = forge.create_repo("new/name");
+    let tip = target.commit("first");
+    forge.redirect("old/name", &target);
+    let app = TestApp::with_config(&config_with_token(&[moved.url()], &forge.host(), TOKEN)).await;
+
+    app.advance_and_settle(24 * HOUR).await;
+
+    let archive = app.archive(&format!("{}/old/name", forge.host()));
+    assert_eq!(refs(&archive)["refs/heads/main"], tip);
+}
+
+#[tokio::test]
+async fn the_token_goes_out_with_the_first_request_so_anonymous_limits_never_apply() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("public/repo");
+    upstream.commit("first");
+    let app =
+        TestApp::with_config(&config_with_token(&[upstream.url()], &forge.host(), TOKEN)).await;
+
+    app.advance_and_settle(24 * HOUR).await;
+
+    let metrics = app.metrics().await;
+    assert!(
+        metrics
+            .last_success(&repo_id(&forge, "public/repo"))
+            .is_some()
+    );
+    let authorizations = forge.authorizations();
+    assert!(
+        !authorizations.is_empty(),
+        "upstream never asked, so it never got the token"
+    );
+}
+
+#[tokio::test]
 async fn a_token_applies_to_its_host_whatever_the_case() {
     let forge = FakeForge::start().await;
     forge.require_token(TOKEN);
@@ -168,10 +235,7 @@ async fn changing_the_token_in_the_config_takes_effect_from_the_next_fetch() {
     let metrics = app.metrics().await;
     assert_eq!(metrics.last_success(&id), None);
     assert_eq!(metrics.repo_status(&id), Some("unavailable"));
-    assert_hidden(&metrics.text, WRONG_TOKEN, "/metrics");
-    assert_hidden(&app.get("/").await.text(), WRONG_TOKEN, "the list page");
-    let state = std::fs::read_to_string(app.data_dir().join("state.json")).unwrap();
-    assert_hidden(&state, WRONG_TOKEN, "state.json");
+    assert_hidden_by_app(&app, WRONG_TOKEN).await;
 
     app.write_config(&config_with_token(&[upstream.url()], &forge.host(), TOKEN));
     app.advance_and_settle(24 * HOUR).await;

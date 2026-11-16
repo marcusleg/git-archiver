@@ -132,8 +132,9 @@ impl Scheduler {
         let attempt = whole_seconds(self.clock.now());
         let timer = Instant::now();
         tracing::info!(repo = %repo.id, "fetching");
+        let token = self.tokens.for_repo(&repo.id);
         let result = tokio::select! {
-            result = self.archives.fetch(&repo.id, &repo.url, attempt, self.tokens.for_repo(&repo.id)) => result,
+            result = self.archives.fetch(&repo.id, &repo.url, attempt, token) => result,
             () = self.clock.sleep_until(attempt + FETCH_TIMEOUT) => Err(FetchError::Failed {
                 reason: format!(
                     "fetch timed out after {}",

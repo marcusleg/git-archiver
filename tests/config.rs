@@ -72,6 +72,10 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
             "[hosts.\"github.com\"]\ntoken = \"\"",
             "`hosts.\"github.com\".token` must not be empty",
         ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"ghp_x\\nurl=https://evil\"",
+            "`hosts.\"github.com\".token` must not be empty or contain spaces",
+        ),
         ("[hosts.\"github.com\"]\ntokn = \"x\"", "tokn"),
         (
             "[hosts.\"https://github.com\"]\ntoken = \"x\"",
