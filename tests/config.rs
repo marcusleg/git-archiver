@@ -55,6 +55,10 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
             "must be an http:// or https:// URL",
         ),
         ("repos = \"https://example.com/foo\"", "repos"),
+        (
+            "repos = [\"https://user:secret@example.com/foo/bar\"]",
+            "must not contain credentials",
+        ),
         ("intervall = \"24h\"", "intervall"),
         (
             "[hosts.\"github.com\"]\ntoken = \"\"",

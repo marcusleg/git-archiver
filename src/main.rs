@@ -33,7 +33,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let app = git_archiver::start(git_archiver::Options {
+    let mut app = git_archiver::start(git_archiver::Options {
         data_dir: cli.data_dir,
         listen: None,
     })
@@ -42,6 +42,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     tokio::select! {
+        result = app.stopped() => return result,
         _ = terminate.recv() => {}
         _ = interrupt.recv() => {}
     }

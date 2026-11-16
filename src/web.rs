@@ -39,38 +39,35 @@ const ASSET_CACHE: &str = "public, max-age=3600";
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(list))
+        .route("/", get(list_page))
         .route("/assets/style.css", get(stylesheet))
         .route("/assets/fonts/{name}", get(font))
         .with_state(state)
 }
 
 async fn stylesheet() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, ASSET_CACHE),
-        ],
-        STYLESHEET,
-    )
-        .into_response()
+    asset("text/css; charset=utf-8", STYLESHEET.as_bytes())
 }
 
 async fn font(Path(name): Path<String>) -> Response {
     match FONTS.iter().find(|(file, _)| *file == name) {
-        Some((_, bytes)) => (
-            [
-                (header::CONTENT_TYPE, "font/woff2"),
-                (header::CACHE_CONTROL, ASSET_CACHE),
-            ],
-            *bytes,
-        )
-            .into_response(),
+        Some((_, bytes)) => asset("font/woff2", bytes),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-async fn list(State(state): State<Arc<AppState>>) -> Html<String> {
+fn asset(content_type: &'static str, body: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, ASSET_CACHE),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn list_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let repos = &state.config.repos;
     Html(
         layout(html! {

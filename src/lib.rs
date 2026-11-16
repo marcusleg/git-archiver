@@ -40,11 +40,11 @@ impl RunningApp {
         let _ = self.server.await;
     }
 
-    /// Serves until the server stops on its own (it normally doesn't).
-    pub async fn wait(self) -> anyhow::Result<()> {
-        let _keep_running = self.shutdown;
-        self.server.await.context("server task failed")??;
-        Ok(())
+    /// Resolves only if the server stops on its own, which it normally
+    /// doesn't. Don't call `shutdown` after this has resolved.
+    pub async fn stopped(&mut self) -> anyhow::Result<()> {
+        (&mut self.server).await.context("server task failed")??;
+        anyhow::bail!("server stopped unexpectedly")
     }
 }
 
@@ -59,7 +59,7 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
 
     let router = web::router(Arc::new(web::AppState {
         config,
-        config_path: config::path(&options.data_dir),
+        config_path: config::file_path(&options.data_dir),
     }));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
