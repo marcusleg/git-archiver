@@ -96,11 +96,7 @@ impl Scheduler {
         started: SystemTime,
         now: SystemTime,
     ) -> Option<(SystemTime, Tracked)> {
-        let first = overview
-            .fetch_first
-            .iter()
-            .find_map(|id| overview.tracked.iter().find(|t| &t.id == id));
-        if let Some(repo) = first {
+        if let Some(repo) = Tracking::fetch_first(overview) {
             return Some((now, repo.clone()));
         }
         let count = u32::try_from(overview.tracked.len()).unwrap_or(u32::MAX);
