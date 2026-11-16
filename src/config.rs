@@ -297,10 +297,11 @@ fn shown_key(path: &[&str]) -> Option<String> {
         .iter()
         .enumerate()
         .map(|(i, &part)| {
-            if APP_NAMES.contains(&part) {
-                Some(part.to_owned())
-            } else if i == 1 && path[0] == "hosts" {
+            // A `hosts` key is a host, whatever it's called.
+            if i == 1 && path[0] == "hosts" {
                 shown_host(part)
+            } else if APP_NAMES.contains(&part) {
+                Some(part.to_owned())
             } else {
                 None
             }
@@ -768,60 +769,66 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether a `hosts` key is a host, with a port if it names one, such as
-/// `github.com`, `localhost:3000` or `[::1]:8080`. Only a port follows a
-/// `:`, so a key such as `user:password` is no host.
-fn is_host(key: &str) -> bool {
-    let (name_ok, port) = match key.strip_prefix('[') {
-        Some(bracketed) => match bracketed.split_once(']') {
-            Some((ip, port)) => (
-                !ip.is_empty()
-                    && ip
-                        .chars()
-                        .all(|c| c.is_ascii_hexdigit() || ":.".contains(c)),
-                port,
-            ),
-            None => return false,
-        },
+/// The name in a `hosts` key that is a host, without its port.
+enum HostName<'a> {
+    /// What the brackets hold, such as `::1` in `[::1]:8080`.
+    Bracketed(&'a str),
+    /// Such as `github.com` in `github.com:443`.
+    Plain(&'a str),
+}
+
+/// The name in a `hosts` key, if the key is a host, with a port if it names
+/// one, such as `github.com`, `localhost:3000` or `[::1]:8080`. Only a port
+/// follows a `:`, so a key such as `user:password` is no host.
+fn host_name(key: &str) -> Option<HostName<'_>> {
+    let (name, port) = match key.strip_prefix('[') {
+        Some(bracketed) => {
+            let (ip, port) = bracketed.split_once(']')?;
+            let ip_ok = !ip.is_empty()
+                && ip
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || ":.".contains(c));
+            (ip_ok.then_some(HostName::Bracketed(ip)), port)
+        }
         None => {
             let (name, port) = key.split_at(key.find(':').unwrap_or(key.len()));
-            (
-                !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c)),
-                port,
-            )
+            let name_ok = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c));
+            (name_ok.then_some(HostName::Plain(name)), port)
         }
     };
     let port_ok = port.is_empty()
         || port
             .strip_prefix(':')
             .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
-    name_ok && port_ok
+    name.filter(|_| port_ok)
+}
+
+/// Whether a `hosts` key is a host, as [`host_name`] reads it.
+fn is_host(key: &str) -> bool {
+    host_name(key).is_some()
+}
+
+/// Whether an error may name a `hosts` key. [`is_host`] accepts any run of
+/// letters, digits, `.`, `-` and `_`, which is also the shape of a bare
+/// token such as `ghp_…` or `glpat-…`, so the key must be a host whose name
+/// has a `.`, which no token format in use holds, or is `localhost` or a
+/// bracketed IPv6 address.
+fn may_name_host(key: &str) -> bool {
+    match host_name(key) {
+        Some(HostName::Bracketed(ip)) => ip.parse::<Ipv6Addr>().is_ok(),
+        Some(HostName::Plain(name)) => name.contains('.') || name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
 }
 
 /// A `hosts` key as an error may name it, as a toml key: quoted unless it's
-/// a bare key. None unless it's a host that looks like a domain name, as
-/// [`is_host`] also accepts any run of letters, digits, `.`, `-` and `_`,
-/// which is the shape of a bare token such as `ghp_…` or `glpat-…`. So the
-/// host must have a `.`, which no token format in use holds, or be
-/// `localhost` or a bracketed IPv6 address, with a port if it names one. A
-/// host holds no `"` or `\` that quoting would need to escape.
+/// a bare key. None unless [`may_name_host`]. A host holds no `"` or `\`
+/// that quoting would need to escape.
 fn shown_host(key: &str) -> Option<String> {
-    if !is_host(key) {
-        return None;
-    }
-    let looks_like_a_domain = match key.strip_prefix('[') {
-        Some(bracketed) => bracketed
-            .split_once(']')
-            .is_some_and(|(ip, _)| ip.parse::<Ipv6Addr>().is_ok()),
-        None => {
-            let name = key.split(':').next().unwrap_or_default();
-            name.contains('.') || name.eq_ignore_ascii_case("localhost")
-        }
-    };
-    if !looks_like_a_domain {
+    if !may_name_host(key) {
         None
     } else if key
         .chars()
@@ -869,9 +876,10 @@ fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, C
             .is_some()
         {
             // The line and column say which host, if it may not be named.
-            let named = match shown_host(host.get_ref()) {
-                Some(_) => format!("{:?}", host.get_ref()),
-                None => "a host".to_owned(),
+            let named = if may_name_host(host.get_ref()) {
+                format!("{:?}", host.get_ref())
+            } else {
+                "a host".to_owned()
             };
             return Err(ConfigError::at(
                 &host,
