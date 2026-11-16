@@ -65,6 +65,14 @@ pub fn refs(repo: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The archive's preserved refs, by name, with the object each points at.
+pub fn preserved_refs(repo: &Path) -> BTreeMap<String, String> {
+    refs(repo)
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("refs/preserved/"))
+        .collect()
+}
+
 /// The commit a ref (or a tag, peeled) points at.
 pub fn commit_of(repo: &Path, rev: &str) -> String {
     git(repo, &["rev-parse", &format!("{rev}^{{commit}}")])

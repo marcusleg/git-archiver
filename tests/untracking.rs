@@ -4,7 +4,7 @@
 mod common;
 
 use common::forge::{FakeForge, Upstream};
-use common::git::refs;
+use common::git::{preserved_refs, refs};
 use std::time::Duration;
 
 use common::{HOUR, Page, TestApp, config_tracking};
@@ -212,10 +212,7 @@ async fn untracked_archive_with_preserved_ref(
     upstream.force_push_new_history("rewritten");
     app.advance_and_settle(24 * HOUR).await;
     let archive = app.archive(&format!("{}/foo/bar", forge.host()));
-    let preserved: Vec<String> = refs(&archive)
-        .into_keys()
-        .filter(|name| name.starts_with("refs/preserved/"))
-        .collect();
+    let preserved: Vec<String> = preserved_refs(&archive).into_keys().collect();
     assert_eq!(preserved.len(), 1, "{preserved:?}");
     let page = untrack(&app, upstream.url(), "Keep archive").await;
     assert_eq!(page.status, 200, "{}", page.text());

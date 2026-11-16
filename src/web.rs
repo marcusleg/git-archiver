@@ -518,7 +518,7 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
     } = card;
     // Only an archive on disk can be cloned.
     let clone = archived.then(|| git_http::clone_command(base, id));
-    let mirror = archived.then(|| git_http::mirror_clone_command(base, id));
+    let mirror_clone = archived.then(|| git_http::mirror_clone_command(base, id));
     let fetched = state.status == Some(Status::Available);
     let unavailable_or_failed = matches!(
         state.status,
@@ -606,7 +606,7 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
                 }
             }
             @if let Some(preserved) = &inspection.preserved {
-                (preserved_refs(preserved, mirror.as_deref()))
+                (preserved_refs(preserved, mirror_clone.as_deref()))
             }
             @if let Some(clone) = clone {
                 (clone_line(&clone, "clone", "Copy clone command"))
@@ -640,9 +640,9 @@ fn clone_line(command: &str, class: &str, label: &str) -> Markup {
 }
 
 /// How many refs the archive preserved from before rewrites, expanding to
-/// their names and SHAs and, when the archive can be cloned, the `mirror`
-/// clone command that brings them along.
-fn preserved_refs(preserved: &BTreeMap<String, String>, mirror: Option<&str>) -> Markup {
+/// their names and SHAs and, when the archive can be cloned, the
+/// `mirror_clone` command that brings them along.
+fn preserved_refs(preserved: &BTreeMap<String, String>, mirror_clone: Option<&str>) -> Markup {
     let label = html! {
         (icon_history())
         span { span .count { (preserved.len()) } " preserved ref" @if preserved.len() != 1 { "s" } }
@@ -658,9 +658,9 @@ fn preserved_refs(preserved: &BTreeMap<String, String>, mirror: Option<&str>) ->
                         li { code .ref { (name) } (short_sha(sha)) }
                     }
                 }
-                @if let Some(mirror) = mirror {
+                @if let Some(mirror_clone) = mirror_clone {
                     p .mirror-note { "A mirror clone includes the preserved refs:" }
-                    (clone_line(mirror, "mirror", "Copy mirror clone command"))
+                    (clone_line(mirror_clone, "mirror-clone", "Copy mirror clone command"))
                 }
             }
         }

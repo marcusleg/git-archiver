@@ -150,13 +150,15 @@ Every archive, tracked or not, can be cloned read-only from the git endpoint und
 git clone http://localhost:8080/git/github.com/owner/repo.git
 ```
 
-A plain clone gets the default branch and tags. To get the preserved refs too, clone with `--mirror`, or fetch them into an existing clone. When an archive has preserved refs, its card offers the mirror clone command too, under the expanded list of preserved refs:
+A plain clone gets the default branch and tags. To get the preserved refs too, clone with `--mirror`, or fetch them into an existing clone:
 
 ```sh
 git clone --mirror http://localhost:8080/git/github.com/owner/repo.git
 # or, inside a clone:
 git fetch origin 'refs/preserved/*:refs/preserved/*'
 ```
+
+When an archive has preserved refs, its card offers the mirror clone command too, under the expanded list of preserved refs.
 
 Preserved refs are named `refs/preserved/<UTC time of the rewrite>/heads/<branch>` or `refs/preserved/<UTC time of the rewrite>/tags/<tag>`.
 
