@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use base64::Engine;
 use serde::Deserialize;
+use toml::Spanned;
+use toml::de::DeTable;
 use toml_edit::{Array, DocumentMut, RawString, Value};
 
 use crate::identity::RepoId;
@@ -29,7 +31,7 @@ pub struct Config {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostConfig {
-    token: Token,
+    token: Spanned<Token>,
 }
 
 /// An access token for one host. Its `Debug` output hides it, so it can't
@@ -79,25 +81,27 @@ impl Tokens {
     }
 }
 
+/// The config as written, with where each value the app checks itself sits,
+/// so that its error can say where.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default = "default_interval")]
-    interval: String,
+    interval: Spanned<String>,
     #[serde(default = "default_listen")]
-    listen: String,
+    listen: Spanned<String>,
     #[serde(default)]
-    repos: Vec<String>,
+    repos: Vec<Spanned<String>>,
     #[serde(default)]
-    hosts: BTreeMap<String, HostConfig>,
+    hosts: BTreeMap<Spanned<String>, HostConfig>,
 }
 
-fn default_interval() -> String {
-    "24h".to_owned()
+fn default_interval() -> Spanned<String> {
+    Spanned::new(0..0, "24h".to_owned())
 }
 
-fn default_listen() -> String {
-    "0.0.0.0:8080".to_owned()
+fn default_listen() -> Spanned<String> {
+    Spanned::new(0..0, "0.0.0.0:8080".to_owned())
 }
 
 pub fn file_path(data_dir: &Path) -> PathBuf {
@@ -140,240 +144,274 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
     parse(&text).with_context(|| format!("invalid config {}", path.display()))
 }
 
+/// Reads and checks a config. Every config error comes from here, and is
+/// built only from text the app knows, as it goes to the startup error, the
+/// log and the list page, which anyone can read, and anything the user wrote
+/// may be a credential: see [`ConfigError`].
 fn parse(text: &str) -> anyhow::Result<Config> {
-    let raw: RawConfig = toml::from_str(text).map_err(|e| syntax_error(text, &e))?;
+    check(text).map_err(|error| anyhow::anyhow!(error.shown(text)))
+}
+
+fn check(text: &str) -> Result<Config, ConfigError> {
+    let doc = DeTable::parse(text).map_err(|e| ConfigError::while_parsing(&e))?;
+    let raw = RawConfig::deserialize(toml::de::Deserializer::from(doc.clone()))
+        .map_err(|e| ConfigError::after_parsing(doc.get_ref(), &e))?;
     Ok(Config {
-        interval: parse_interval(&raw.interval)?,
-        listen: raw.listen.parse().with_context(|| {
-            format!(
-                "`listen` must be an IP address and port such as \"0.0.0.0:8080\", got {:?}",
-                raw.listen
+        interval: check_interval(&raw.interval)?,
+        listen: raw.listen.get_ref().parse().map_err(|_| {
+            ConfigError::at(
+                &raw.listen,
+                "`listen` must be an IP address and port such as \"0.0.0.0:8080\"",
             )
         })?,
         repos: raw
             .repos
             .into_iter()
-            .map(validate_repo_url)
-            .collect::<anyhow::Result<_>>()?,
-        tokens: validate_hosts(raw.hosts)?,
+            .enumerate()
+            .map(|(i, repo)| check_repo_entry(i + 1, repo))
+            .collect::<Result<_, _>>()?,
+        tokens: check_hosts(raw.hosts)?,
     })
 }
 
-/// Names the place and the problem but, unlike toml's own message, doesn't
-/// quote the line or any string value, either of which may be a token. Names
-/// the key instead, if the line sets one that toml can read, with any
-/// credentials in it hidden, and hides them in any field the message names
-/// too.
-fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
-    let message = hide_quoted(error.message().trim());
-    let Some(span) = error.span() else {
-        return anyhow::anyhow!("{message}");
-    };
-    let start = span.start.min(text.len());
-    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
-    let line_number = text[..start].matches('\n').count() + 1;
-    let column = text[line_start..start].chars().count() + 1;
-    let line = text[line_start..].lines().next().unwrap_or_default();
-    let place = match key_set_on(line).and_then(unescaped_key) {
-        Some(key) => {
-            let shown = hide_key_credentials(&key);
-            format!("line {line_number} (`{shown}`)")
-        }
-        None => format!("line {line_number}"),
-    };
-    anyhow::anyhow!("{place}, column {column}: {message}")
+/// A config error, as only [`parse`] shows it: the line and column it starts
+/// at, the key it's about if that's known and may be shown, and the problem.
+struct ConfigError {
+    span: Option<Range<usize>>,
+    /// As [`shown_key`] shows it.
+    key: Option<String>,
+    /// Text the app wrote, or toml's or serde's with [`hide_file_text`]
+    /// applied.
+    problem: String,
 }
 
-/// The key a `key = value` line sets: everything up to the first `=` outside
-/// quotes, since a quoted key such as a URL may hold an `=` of its own. None
-/// for a table header, or a line that sets no key.
-fn key_set_on(line: &str) -> Option<&str> {
-    let line = line.trim();
-    if line.starts_with('[') {
-        return None;
+impl ConfigError {
+    /// A problem the app found with the value at `value`.
+    fn at<T>(value: &Spanned<T>, problem: impl Into<String>) -> Self {
+        Self {
+            span: Some(value.span()),
+            key: None,
+            problem: problem.into(),
+        }
     }
-    let mut quote = None;
-    let mut escaped = false;
-    for (i, c) in line.char_indices() {
-        match quote {
-            // Only a double-quoted key has escapes, such as `\"`.
-            Some('"') if escaped => escaped = false,
-            Some('"') if c == '\\' => escaped = true,
-            Some(open) if c == open => quote = None,
-            Some(_) => {}
-            None if c == '"' || c == '\'' => quote = Some(c),
-            None if c == '=' => return Some(line[..i].trim()).filter(|key| !key.is_empty()),
-            None => {}
+
+    /// A syntax error, found before the file parsed. It names no key, as
+    /// there is no parsed file to take one from, and a line that looks like
+    /// it sets one may well be inside a string.
+    fn while_parsing(error: &toml::de::Error) -> Self {
+        Self {
+            span: error.span(),
+            key: None,
+            problem: hide_file_text(error.message(), None),
+        }
+    }
+
+    /// An error serde found in the parsed file `doc`, such as an unknown
+    /// field or a value of the wrong type, naming the key it's at.
+    fn after_parsing(doc: &DeTable<'_>, error: &toml::de::Error) -> Self {
+        let found = error.span().and_then(|span| key_at(doc, span.start));
+        let key = found.as_ref().and_then(|found| shown_key(&found.path));
+        let on_key = found
+            .as_ref()
+            .filter(|found| found.on_key)
+            .and_then(|found| found.path.last().copied());
+        Self {
+            span: error.span(),
+            key,
+            problem: hide_file_text(error.message(), on_key),
+        }
+    }
+
+    fn shown(&self, text: &str) -> String {
+        let Some(span) = &self.span else {
+            return self.problem.clone();
+        };
+        let start = span.start.min(text.len());
+        let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+        let line = text[..start].matches('\n').count() + 1;
+        let column = text[line_start..start].chars().count() + 1;
+        let problem = &self.problem;
+        match &self.key {
+            Some(key) => format!("line {line} (`{key}`), column {column}: {problem}"),
+            None => format!("line {line}, column {column}: {problem}"),
+        }
+    }
+}
+
+/// The keys leading to what sits at a place in the file, and whether the
+/// place is on the last key itself rather than on its value.
+struct KeyAt<'a> {
+    path: Vec<&'a str>,
+    on_key: bool,
+}
+
+/// The keys leading to the deepest key or value in `table` that holds byte
+/// `at`, if any does.
+fn key_at<'a>(table: &'a DeTable<'_>, at: usize) -> Option<KeyAt<'a>> {
+    for (key, value) in table {
+        let name: &str = key.get_ref();
+        if key.span().contains(&at) {
+            return Some(KeyAt {
+                path: vec![name],
+                on_key: true,
+            });
+        }
+        // A table's span may cover only its header, so its keys are
+        // searched whatever its span.
+        if let Some(mut inner) = value.get_ref().as_table().and_then(|t| key_at(t, at)) {
+            inner.path.insert(0, name);
+            return Some(inner);
+        }
+        if value.span().contains(&at) {
+            return Some(KeyAt {
+                path: vec![name],
+                on_key: false,
+            });
         }
     }
     None
 }
 
-/// The key as toml reads it, escapes applied, so that hiding credentials
-/// finds an `@` however it's written, such as `\u0040`. For display only:
-/// each part of a dotted key is shown bare if it can be, and otherwise
-/// quoted the way Rust quotes a string, which may not be valid toml. None if
-/// toml can't read the key.
-fn unescaped_key(key: &str) -> Option<String> {
-    let parts = toml_edit::Key::parse(key).ok()?;
-    let shown: Vec<String> = parts
+/// The names the app gives its settings, which an error may always show.
+const APP_NAMES: [&str; 5] = ["interval", "listen", "repos", "hosts", "token"];
+
+/// What toml's syntax errors quote in backticks, none of it from the file:
+/// the punctuation and escape letters it expected.
+const TOML_TOKENS: [&str; 28] = [
+    "#", "'", ",", "-", "=", ".", "[", "]", "]]", "{", "}", "_", "\\", "\"", "\"\"\"", "'''", "0b",
+    "0o", "0x", "b", "e", "f", "n", "r", "t", "u", "U", "x",
+];
+
+/// A key as an error may show it, such as `hosts."github.com".…`: each part
+/// that is one of the app's own names, or a `hosts` key that is a host, and
+/// `…` for any other part, which may be a credential. None if no part may be
+/// shown.
+fn shown_key(path: &[&str]) -> Option<String> {
+    let parts: Vec<Option<String>> = path
         .iter()
-        .map(|part| {
-            let part = part.get();
-            let bare = !part.is_empty()
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-            if bare {
-                part.to_owned()
+        .enumerate()
+        .map(|(i, &part)| {
+            if APP_NAMES.contains(&part) {
+                Some(part.to_owned())
+            } else if i == 1 && path[0] == "hosts" && is_host(part) {
+                Some(shown_host(part))
             } else {
-                format!("{part:?}")
+                None
             }
         })
         .collect();
-    Some(shown.join("."))
-}
-
-/// Hides what toml's message may quote from the config: any credentials in
-/// the field it names in backticks, such as
-/// ``unknown field `https://…@host`, expected `token` ``, and every
-/// double-quoted string, such as the value in
-/// `invalid type: string "…", expected a sequence`.
-fn hide_quoted(message: &str) -> String {
-    match field_span(message) {
-        Some(field) => format!(
-            "{}{}{}",
-            hide_strings(&message[..field.start]),
-            hide_credentials(&message[field.clone()]),
-            hide_strings(&message[field.end..]),
-        ),
-        None => hide_strings(message),
+    if parts.iter().all(Option::is_none) {
+        return None;
     }
-}
-
-/// Where the field a message names sits: from its first backtick outside a
-/// double-quoted string to the backtick that starts what was expected, or
-/// else to its last backtick. serde quotes the field as written, without
-/// escaping, so neither a backtick nor a `"` inside it can be trusted to end
-/// it, but the field names listed after it hold neither.
-fn field_span(message: &str) -> Option<Range<usize>> {
-    let strings = string_spans(message);
-    let (tick, _) = message
-        .match_indices('`')
-        .find(|(i, _)| !strings.iter().any(|string| string.contains(i)))?;
-    let start = tick + 1;
-    let rest = &message[start..];
-    let end = ["`, expected", "`, there are no fields"]
+    let parts: Vec<String> = parts
         .into_iter()
-        .filter_map(|after| rest.rfind(after))
-        .max()
-        .or_else(|| rest.rfind('`'))?;
-    Some(start..start + end)
+        .map(|part| part.unwrap_or_else(|| "…".to_owned()))
+        .collect();
+    Some(parts.join("."))
 }
 
-/// Replaces every double-quoted string in a message, such as the value in
-/// `invalid type: string "…", expected a sequence`, with `"…"`.
-fn hide_strings(message: &str) -> String {
-    let mut hidden = String::new();
-    let mut shown_from = 0;
-    for string in string_spans(message) {
-        hidden.push_str(&message[shown_from..string.start]);
-        hidden.push_str("\"…\"");
-        shown_from = string.end;
-    }
-    hidden.push_str(&message[shown_from..]);
-    hidden
-}
-
-/// Where each double-quoted string in a message sits, quotes included.
-/// serde writes a string value with Rust's escapes, so a string ends at the
-/// first `"` that no `\` escapes; an unclosed one runs to the end.
-fn string_spans(message: &str) -> Vec<Range<usize>> {
-    let mut spans = Vec::new();
-    let mut chars = message.char_indices();
-    while let Some((start, c)) = chars.next() {
-        if c != '"' {
-            continue;
+/// toml's or serde's problem text with every piece it quotes from the file
+/// shown as `…`: each double-quoted string, which serde writes with Rust's
+/// escapes, and each backtick-quoted piece other than [`APP_NAMES`] and
+/// [`TOML_TOKENS`]. serde quotes an unknown field in backticks without
+/// escaping it, so `key`, the key the error is on, is hidden first, as a
+/// backtick inside it would end it early.
+fn hide_file_text(message: &str, key: Option<&str>) -> String {
+    let message = match key {
+        Some(key) => message.replacen(&format!("`{key}`"), "`…`", 1),
+        None => message.to_owned(),
+    };
+    let mut shown = String::new();
+    let mut rest = message.trim();
+    while let Some(open) = rest.find(['"', '`']) {
+        shown.push_str(&rest[..open]);
+        let quote = &rest[open..=open];
+        let quoted = &rest[open + 1..];
+        let end = if quote == "\"" {
+            string_end(quoted)
+        } else {
+            quoted.find('`')
+        };
+        let piece = &quoted[..end.unwrap_or(quoted.len())];
+        if quote == "`" && (APP_NAMES.contains(&piece) || TOML_TOKENS.contains(&piece)) {
+            shown.push_str(&format!("`{piece}`"));
+        } else {
+            shown.push_str(&format!("{quote}…{quote}"));
         }
-        let mut end = message.len();
-        let mut escaped = false;
-        for (i, c) in chars.by_ref() {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => {
-                    end = i + 1;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        spans.push(start..end);
+        rest = end.map_or("", |end| &quoted[end + 1..]);
     }
-    spans
+    shown.push_str(rest);
+    shown
 }
 
-fn parse_interval(text: &str) -> anyhow::Result<Duration> {
-    let interval = humantime::parse_duration(text).with_context(|| {
-        format!("`interval` must be a duration such as \"24h\" or \"90m\", got {text:?}")
+/// Where the string serde wrote ends: at the first `"` no `\` escapes.
+fn string_end(quoted: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (i, c) in quoted.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn check_interval(text: &Spanned<String>) -> Result<Duration, ConfigError> {
+    let interval = humantime::parse_duration(text.get_ref()).map_err(|_| {
+        ConfigError::at(
+            text,
+            "`interval` must be a duration such as \"24h\" or \"90m\"",
+        )
     })?;
     if interval.is_zero() {
-        bail!("`interval` must be longer than zero, got {text:?}");
+        return Err(ConfigError::at(text, "`interval` must be longer than zero"));
     }
     Ok(interval)
 }
 
-fn validate_repo_url(repo: String) -> anyhow::Result<String> {
-    if let Err(problem) = check_repo_url(&repo) {
-        let shown = hide_credentials(&repo);
-        bail!("`repos` entry {shown:?} {problem}");
+/// Checks the `repos` entry at `position`, counting from 1.
+fn check_repo_entry(position: usize, repo: Spanned<String>) -> Result<String, ConfigError> {
+    if let Err(problem) = check_repo_url(repo.get_ref()) {
+        let name =
+            url_name(repo.get_ref()).map_or(position.to_string(), |name| format!("{name:?}"));
+        return Err(ConfigError::at(
+            &repo,
+            format!("`repos` entry {name} {problem}"),
+        ));
     }
-    Ok(repo)
+    Ok(repo.into_inner())
 }
 
-/// The text as written, with everything up to the last `@` replaced by `…`,
-/// except a URL scheme such as `https://` at its very start, so an error can
-/// name what it rejects without showing a credential in the UI or the log.
-/// Any user name and password end at an `@`, so cutting up to the last one
-/// also covers a URL that a parser reads differently than its author meant,
-/// such as one whose unencoded password holds a `#`. A `://` anywhere else,
-/// such as inside a password or a query, starts no scheme.
-fn hide_credentials(text: &str) -> String {
-    let Some(at) = text.rfind('@') else {
-        return text.to_owned();
+/// How an error names a `repos` entry or `hosts` key it rejects: from the
+/// URL the text parses as, with `…` for its user info and for a scheme the
+/// app doesn't support, and without its query or fragment, such as
+/// `https://…@github.com/foo/bar`. None if the text doesn't parse as a URL
+/// with a host, or if an `@` follows the host, as it does when a `#`, `/` or
+/// `?` in a password ends the user info early and leaves the rest of it in
+/// the host and path.
+fn url_name(text: &str) -> Option<String> {
+    let url = url::Url::parse(text).ok()?;
+    let host = url.host_str().filter(|host| !host.is_empty())?;
+    if url[url::Position::BeforePath..].contains('@') {
+        return None;
+    }
+    let scheme = match url.scheme() {
+        scheme @ ("http" | "https") => scheme,
+        _ => "…",
     };
-    let start = scheme_len(&text[..at]);
-    format!("{}…{}", &text[..start], &text[at..])
-}
-
-/// The length of the URL scheme and `://` the text starts with, or 0.
-fn scheme_len(text: &str) -> usize {
-    let name_end = text
-        .find(|c: char| !(c.is_ascii_alphanumeric() || "+-.".contains(c)))
-        .unwrap_or(text.len());
-    let starts_with_letter = text.starts_with(|c: char| c.is_ascii_alphabetic());
-    if starts_with_letter && text[name_end..].starts_with("://") {
-        name_end + "://".len()
+    let user_info = if url.username().is_empty() && url.password().is_none() {
+        ""
     } else {
-        0
-    }
-}
-
-/// A key as [`unescaped_key`] shows it, such as
-/// `hosts."https://…@github.com".token`, with its credentials hidden. Only a
-/// quoted part of a key can hold them, as a bare part can't hold a `:` or
-/// `@`, so any bare parts before the first quote are kept along with it, and
-/// the rest is hidden like any text.
-fn hide_key_credentials(key: &str) -> String {
-    let kept = key
-        .find('"')
-        .filter(|&quote| {
-            key[..quote]
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c))
-        })
-        .map_or(0, |quote| quote + 1);
-    format!("{}{}", &key[..kept], hide_credentials(&key[kept..]))
+        "…@"
+    };
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    let path = url.path().trim_end_matches('/');
+    Some(format!("{scheme}://{user_info}{host}{port}{path}"))
 }
 
 /// The repo's identity if the config would accept this URL; otherwise why
@@ -399,7 +437,7 @@ pub fn check_repo_url(repo: &str) -> Result<RepoId, &'static str> {
 #[derive(Debug)]
 pub enum AddError {
     /// The file doesn't hold a valid config right now. Its own error is for
-    /// the log only: it may quote a token.
+    /// the log only.
     Invalid(anyhow::Error),
     /// A repo with the same archive is tracked under this URL.
     AlreadyTracked(String),
@@ -721,31 +759,68 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_hosts(hosts: BTreeMap<String, HostConfig>) -> anyhow::Result<Tokens> {
+/// Whether a `hosts` key is a host, with a port if it names one, such as
+/// `github.com` or `localhost:3000`.
+fn is_host(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-_:[]".contains(c))
+}
+
+/// A host as a toml key: quoted unless it's a bare key. A host holds no `"`
+/// or `\` that quoting would need to escape.
+fn shown_host(host: &str) -> String {
+    if host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
+    {
+        host.to_owned()
+    } else {
+        format!("\"{host}\"")
+    }
+}
+
+fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, ConfigError> {
+    let mut hosts: Vec<_> = hosts.into_iter().collect();
+    // In file order, so a host listed twice is reported where it repeats.
+    hosts.sort_by_key(|(host, _)| host.span().start);
     let mut tokens = BTreeMap::new();
     for (host, settings) in hosts {
-        let valid = !host.is_empty()
-            && host
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || ".-_:[]".contains(c));
-        if !valid {
-            let shown = hide_credentials(&host);
-            bail!(
-                "`hosts` key {shown:?} must be a host such as \"github.com\", \
-                 with a port if the repo URLs name one"
-            );
+        if !is_host(host.get_ref()) {
+            let name = url_name(host.get_ref())
+                .map(|name| format!("{name:?} "))
+                .unwrap_or_default();
+            return Err(ConfigError::at(
+                &host,
+                format!(
+                    "`hosts` key {name}must be a host such as \"github.com\", \
+                     with a port if the repo URLs name one"
+                ),
+            ));
         }
-        if settings.token.is_malformed() {
-            bail!(
-                "`hosts.\"{host}\".token` must not be empty or contain spaces, \
-                 line breaks or control characters"
-            );
+        if settings.token.get_ref().is_malformed() {
+            return Err(ConfigError::at(
+                &settings.token,
+                format!(
+                    "`hosts.{}.token` must not be empty or contain spaces, \
+                     line breaks or control characters",
+                    shown_host(host.get_ref())
+                ),
+            ));
         }
+        let lowercased = host.get_ref().to_ascii_lowercase();
         if tokens
-            .insert(host.to_ascii_lowercase(), settings.token)
+            .insert(lowercased, settings.token.into_inner())
             .is_some()
         {
-            bail!("`hosts` lists {host:?} more than once (host names ignore case)");
+            return Err(ConfigError::at(
+                &host,
+                format!(
+                    "`hosts` lists {:?} more than once (host names ignore case)",
+                    host.get_ref()
+                ),
+            ));
         }
     }
     Ok(Tokens(tokens))

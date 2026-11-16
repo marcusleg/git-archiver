@@ -1,6 +1,7 @@
 mod common;
 
-use common::TestApp;
+use common::{MINUTE, TestApp};
+use scraper::{Html, Selector};
 
 #[tokio::test]
 async fn first_start_writes_a_commented_default_config_listing_every_setting() {
@@ -48,7 +49,7 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
         ),
         (
             "repos = [\"not a url\"]",
-            "\"not a url\" is not a valid URL",
+            "line 1, column 10: `repos` entry 1 is not a valid URL",
         ),
         (
             "repos = [\"ftp://example.com/foo\"]",
@@ -67,7 +68,10 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
             "repos = [\"https://example.com/foo.git/bar\"]",
             "unsupported repository path",
         ),
-        ("intervall = \"24h\"", "intervall"),
+        (
+            "intervall = \"24h\"",
+            "line 1, column 1: unknown field `…`, expected one of `interval`",
+        ),
         (
             "[hosts.\"github.com\"]\ntoken = \"\"",
             "`hosts.\"github.com\".token` must not be empty",
@@ -76,7 +80,10 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
             "[hosts.\"github.com\"]\ntoken = \"ghp_x\\nurl=https://evil\"",
             "`hosts.\"github.com\".token` must not be empty or contain spaces",
         ),
-        ("[hosts.\"github.com\"]\ntokn = \"x\"", "tokn"),
+        (
+            "[hosts.\"github.com\"]\ntokn = \"x\"",
+            "line 2 (`hosts.\"github.com\".…`), column 1: unknown field `…`, expected `token`",
+        ),
         (
             "[hosts.\"https://github.com\"]\ntoken = \"x\"",
             "`hosts` key \"https://github.com\" must be a host",
@@ -96,228 +103,305 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
     }
 }
 
-/// Starts the app with `config`, whose credentials hold `user:` and a
-/// password starting `se`, such as `secretpw` or `se://cretpw`, and checks
-/// that the error names the problem with `expected` but shows no part of the
-/// credentials.
-async fn assert_start_error_hides_credentials(config: &str, expected: &str) {
-    let error = TestApp::start_error(config).await;
-    assert!(error.contains(expected), "{config:?}: {error}");
-    for leaked in ["secret", "se://", "user:"] {
-        assert!(
-            !error.contains(leaked),
-            "{config:?} shows {leaked:?}: {error}"
-        );
-    }
+const GOOD_REPO: &str = "https://example.com/good/repo";
+
+/// Text from the configs in [`every_config_error_shows_where_and_what_but_nothing_the_user_wrote`]
+/// that no error, page or log may show: the passwords and tokens, which hold
+/// `secretpw`, `se://cretpw` or `ghp_`, and the user names before them.
+const MARKERS: [&str; 5] = ["secret", "cretpw", "se://", "ghp_", "user:"];
+
+/// `problem` after the place `line N[ (`key`)], column M` it names.
+fn ends_with_problem(error: &str, expected: &str) -> bool {
+    error.ends_with(&format!(": {expected}"))
+}
+
+/// What the app shows once `config` is written over the config of an app
+/// tracking [`GOOD_REPO`]: the reason in the config warning, the whole list
+/// page and the log. Checks that the app keeps the last good config.
+async fn hand_edit_error(config: &str) -> (String, String, String) {
+    let logs = common::logs::capture();
+    let app = TestApp::tracking(&[GOOD_REPO]).await;
+
+    app.write_config(config);
+    app.advance_and_settle(MINUTE).await;
+
+    let page = app.get("/").await.text();
+    let html = Html::parse_document(&page);
+    let reason = html
+        .select(&Selector::parse("main .banner pre.reason").unwrap())
+        .next()
+        .unwrap_or_else(|| panic!("{config:?}: no config warning: {page}"))
+        .text()
+        .collect();
+    let repos: Vec<String> = html
+        .select(&Selector::parse("main article .repo-url").unwrap())
+        .map(|repo| repo.text().collect::<String>().trim().to_owned())
+        .collect();
+    assert_eq!(repos, [GOOD_REPO], "{config:?}: keeps the last good config");
+    (reason, page, logs.lines().join("\n"))
 }
 
 #[tokio::test]
-async fn a_rejected_repo_url_is_named_without_its_credentials() {
-    let cases = [
+async fn every_config_error_shows_where_and_what_but_nothing_the_user_wrote() {
+    let host = r#"must be a host such as "github.com", with a port if the repo URLs name one"#;
+    let top_level = "expected one of `interval`, `listen`, `repos`, `hosts`";
+    let escapes =
+        r#"missing escaped value, expected `b`, `e`, `f`, `n`, `r`, `\`, `"`, `x`, `u`, `U`"#;
+    let cases: Vec<(&str, String)> = vec![
+        // A rejected `repos` entry is named from its parsed URL, or else by
+        // its position.
         (
-            "https://user:secretpw@example.com/foo/bar",
-            "\"https://…@example.com/foo/bar\" must not contain credentials",
+            r#"repos = ["https://user:secretpw@example.com/foo/bar"]"#,
+            r#"line 1, column 10: `repos` entry "https://…@example.com/foo/bar" must not contain credentials; set a token under [hosts."<host>"] instead"#.into(),
         ),
         (
-            "https://user:secretpw@example.com:99999/foo/bar",
-            "\"https://…@example.com:99999/foo/bar\" is not a valid URL",
+            r#"repos = ["https://user:secretpw@example.com:99999/foo/bar"]"#,
+            "line 1, column 10: `repos` entry 1 is not a valid URL".into(),
         ),
         (
-            "https://user:12345#secretpw@example.com/foo/bar",
-            "\"https://…@example.com/foo/bar\" has no repository path",
+            r#"repos = ["https://user:12345#secretpw@example.com/foo/bar"]"#,
+            "line 1, column 10: `repos` entry 1 has no repository path".into(),
         ),
         (
-            "ftp://user:secretpw@example.com/foo/bar",
-            "\"ftp://…@example.com/foo/bar\" must be an http:// or https:// URL",
+            r#"repos = ["https://example.com/a/b", "ftp://user:secretpw@example.com/foo/bar"]"#,
+            r#"line 1, column 37: `repos` entry "…://…@example.com/foo/bar" must be an http:// or https:// URL"#.into(),
         ),
         (
-            "user:secretpw@example.com/foo/bar",
-            "\"…@example.com/foo/bar\" must be an http:// or https:// URL",
+            r#"repos = ["user:secretpw@example.com/foo/bar"]"#,
+            "line 1, column 10: `repos` entry 1 must be an http:// or https:// URL".into(),
         ),
         (
-            "user:se://cretpw@example.com/foo/bar",
-            "\"…@example.com/foo/bar\" must be an http:// or https:// URL",
-        ),
-    ];
-    for (url, expected) in cases {
-        assert_start_error_hides_credentials(&format!("repos = [\"{url}\"]"), expected).await;
-    }
-}
-
-#[tokio::test]
-async fn a_rejected_hosts_key_is_named_without_its_credentials() {
-    let cases = [
-        (
-            "[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"x\"",
-            "`hosts` key \"https://…@github.com\" must be a host",
+            r#"repos = ["https://example.com/a/b", "user:se://cretpw@example.com/foo/bar"]"#,
+            "line 1, column 37: `repos` entry 2 must be an http:// or https:// URL".into(),
         ),
         (
-            "[hosts]\n\"https://user:secretpw@github.com\" = { token = \"x\" }",
-            "`hosts` key \"https://…@github.com\" must be a host",
+            r#"repos = ["user://secretpw@github.com/foo/bar"]"#,
+            r#"line 1, column 10: `repos` entry "…://…@github.com/foo/bar" must be an http:// or https:// URL"#.into(),
+        ),
+        // A rejected `hosts` key likewise.
+        (
+            "[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
+            format!(r#"line 1, column 8: `hosts` key "https://…@github.com" {host}"#),
         ),
         (
-            "[hosts]\n\"https://user:secretpw@github.com\" = \"x\"",
-            "line 2 (`\"https://…@github.com\"`)",
+            "[hosts]\n\"https://user:secretpw@github.com\" = { token = \"ghp_secretpw\" }",
+            format!(r#"line 2, column 1: `hosts` key "https://…@github.com" {host}"#),
+        ),
+        (
+            "[hosts.\"user://secretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
+            format!(r#"line 1, column 8: `hosts` key "…://…@github.com" {host}"#),
+        ),
+        (
+            "[hosts.\"user:se://cretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 8: `hosts` key {host}"),
+        ),
+        // A token that isn't a string, or a table without one.
+        (
+            "[hosts]\n\"https://user:secretpw@github.com\" = \"ghp_secretpw\"",
+            r#"line 2 (`hosts.…`), column 38: invalid type: string "…", expected struct HostConfig"#.into(),
         ),
         (
             "hosts.\"https://user:secretpw@github.com\".token = 5",
-            "line 1 (`hosts.\"https://…@github.com\".token`)",
+            "line 1 (`hosts.….token`), column 50: invalid type: integer `…`, expected a string".into(),
         ),
         (
             "[hosts]\n\"https://user:secret=secretpw@github.com\" = 5",
-            "line 2 (`\"https://…@github.com\"`)",
+            "line 2 (`hosts.…`), column 45: invalid type: integer `…`, expected struct HostConfig".into(),
         ),
         (
             "[hosts]\n\"https://user:se\\\"cret=secretpw@github.com\" = 5",
-            "line 2 (`\"https://…@github.com\"`)",
+            "line 2 (`hosts.…`), column 47: invalid type: integer `…`, expected struct HostConfig".into(),
         ),
         (
             "[hosts.\"https://user:secret=secretpw@github.com\"]",
-            "line 1, column 1: missing field `token`",
+            "line 1 (`hosts.…`), column 1: missing field `token`".into(),
         ),
         (
-            "[hosts.\"user:se://cretpw@github.com\"]\ntoken = \"x\"",
-            "`hosts` key \"…@github.com\" must be a host",
+            "[hosts]\n\"github.com\" = \"ghp_secretpw\"\n",
+            r#"line 2 (`hosts."github.com"`), column 16: invalid type: string "…", expected struct HostConfig"#.into(),
+        ),
+        (
+            "[hosts]\n\"github.com\" = \"ghp_\\\"secretpw`ab`cd\"\n",
+            r#"line 2 (`hosts."github.com"`), column 16: invalid type: string "…", expected struct HostConfig"#.into(),
+        ),
+        (
+            "repos = \"https://user:ghp_\\\"secretpw`x`pw@github.com\"\n",
+            r#"line 1 (`repos`), column 9: invalid type: string "…", expected a sequence"#.into(),
+        ),
+        // Keys whose escapes spell out credentials.
+        (
+            r#"[hosts]
+"https://user:secretpw\u0040github.com" = "ghp_secretpw""#,
+            r#"line 2 (`hosts.…`), column 43: invalid type: string "…", expected struct HostConfig"#.into(),
+        ),
+        (
+            r#"[hosts]
+"https://user:secretpw\U00000040github.com" = "ghp_secretpw""#,
+            r#"line 2 (`hosts.…`), column 47: invalid type: string "…", expected struct HostConfig"#.into(),
+        ),
+        (
+            r#"[hosts]
+"https://user:secret\u0070w@github.com" = "ghp_secretpw""#,
+            r#"line 2 (`hosts.…`), column 43: invalid type: string "…", expected struct HostConfig"#.into(),
+        ),
+        (
+            r#"[hosts]
+"https://user\u003asecretpw@github.com" = "ghp_secretpw""#,
+            r#"line 2 (`hosts.…`), column 43: invalid type: string "…", expected struct HostConfig"#.into(),
+        ),
+        (
+            r#"[hosts]
+"https\u003a//user:secretpw\u0040github.com" = "ghp_secretpw""#,
+            r#"line 2 (`hosts.…`), column 48: invalid type: string "…", expected struct HostConfig"#.into(),
+        ),
+        (
+            r#"hosts."https://user:secretpw\u0040github.com".token = 5"#,
+            "line 1 (`hosts.….token`), column 55: invalid type: integer `…`, expected a string".into(),
+        ),
+        (
+            r#"[hosts]
+"https://user:secretpw\q\u0040github.com" = "ghp_secretpw""#,
+            format!("line 2, column 24: {escapes}"),
+        ),
+        // An unknown field, however it's quoted or escaped.
+        (
+            r#"[hosts."github.com"]
+token = "ghp_secretpw"
+"https://user:secretpw@github.com" = "x""#,
+            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+        ),
+        (
+            r#"[hosts."github.com"]
+token = "ghp_secretpw"
+"https://user:secretpw\u0040github.com" = "x""#,
+            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+        ),
+        (
+            r#"[hosts."github.com"]
+token = "ghp_secretpw"
+"https://user:secret\"pw@github.com" = "x""#,
+            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+        ),
+        (
+            r#"[hosts."github.com"]
+token = "ghp_secretpw"
+'https://user:secret"pw@github.com' = "x""#,
+            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+        ),
+        (
+            r#"[hosts."github.com"]
+token = "ghp_secretpw"
+'https://user:secretpw"@"github.com' = "x""#,
+            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+        ),
+        (
+            r#"[hosts."github.com"]
+token = "ghp_secretpw"
+"https://user:sec`ret, expected `token` pw@github.com" = "x""#,
+            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+        ),
+        (
+            "[\"https://user:secretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 2: unknown field `…`, {top_level}"),
+        ),
+        (
+            "[\"https://user:sec`retpw@github.com\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 2: unknown field `…`, {top_level}"),
+        ),
+        (
+            "[\"user:secretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 2: unknown field `…`, {top_level}"),
+        ),
+        (
+            "[\"user:secretpw@github.com/?x=://\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 2: unknown field `…`, {top_level}"),
+        ),
+        (
+            "['https://user:secret\"pw@github.com']\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 2: unknown field `…`, {top_level}"),
+        ),
+        (
+            "[\"user:se://cretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 2: unknown field `…`, {top_level}"),
+        ),
+        // A token written as a key.
+        (
+            "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\"\nghp_secretpw = \"b\"",
+            r#"line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token`"#.into(),
+        ),
+        (
+            "ghp_secretpw = 1",
+            format!("line 1, column 1: unknown field `…`, {top_level}"),
+        ),
+        // A syntax error names no key, even on a line that looks like it
+        // sets one.
+        (
+            "repos = []\n[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\n",
+            "line 3, column 22: invalid basic string, expected `\"`".into(),
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"\"\"\nghp_secretpw = \\q\"\"\"",
+            format!("line 3, column 17: {escapes}"),
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"\"\"\nghp_secret=pw\"\"\" x",
+            "line 3, column 18: unexpected key or value, expected newline, `#`".into(),
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"\"\"\nghp_secretpw = \u{7}\"\"\"",
+            "line 3, column 16: invalid multi-line basic string, expected `\\`, characters".into(),
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = '''\nghp_secretpw = \u{7}'''",
+            "line 3, column 16: invalid multi-line literal string, expected non-single-quote characters".into(),
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = '''\nghp_secret=pw''' x",
+            "line 3, column 18: unexpected key or value, expected newline, `#`".into(),
+        ),
+        // Values the app checks itself.
+        (
+            "interval = \"secretpw\"",
+            r#"line 1, column 12: `interval` must be a duration such as "24h" or "90m""#.into(),
+        ),
+        (
+            "listen = \"secretpw\"",
+            r#"line 1, column 10: `listen` must be an IP address and port such as "0.0.0.0:8080""#.into(),
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw x\"",
+            r#"line 2, column 9: `hosts."github.com".token` must not be empty or contain spaces, line breaks or control characters"#.into(),
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\"\n[hosts.\"GitHub.com\"]\ntoken = \"ghp_secretpw\"",
+            r#"line 3, column 8: `hosts` lists "GitHub.com" more than once (host names ignore case)"#.into(),
         ),
     ];
-    for (config, expected) in cases {
-        assert_start_error_hides_credentials(config, expected).await;
-    }
-}
+    for (config, expected) in &cases {
+        let at_start = TestApp::start_error(config).await;
+        assert!(
+            ends_with_problem(&at_start, expected),
+            "{config:?} at startup:\n  expected …: {expected}\n  got        {at_start}"
+        );
 
-#[tokio::test]
-async fn a_key_is_named_without_its_credentials_whatever_escapes_it_uses() {
-    let cases = [
-        (
-            "[hosts]\n\"https://user:secretpw\\u0040github.com\" = \"ghp_x\"",
-            "line 2 (`\"https://…@github.com\"`), column 43: invalid type",
-        ),
-        (
-            "[hosts]\n\"https://user:secretpw\\U00000040github.com\" = \"ghp_x\"",
-            "line 2 (`\"https://…@github.com\"`), column 47: invalid type",
-        ),
-        (
-            "[hosts]\n\"https://user:secret\\u0070w@github.com\" = \"ghp_x\"",
-            "line 2 (`\"https://…@github.com\"`)",
-        ),
-        (
-            "[hosts]\n\"https://user\\u003asecretpw@github.com\" = \"ghp_x\"",
-            "line 2 (`\"https://…@github.com\"`)",
-        ),
-        (
-            "[hosts]\n\"https\\u003a//user:secretpw\\u0040github.com\" = \"ghp_x\"",
-            "line 2 (`\"https://…@github.com\"`)",
-        ),
-        (
-            "hosts.\"https://user:secretpw\\u0040github.com\".token = 5",
-            "line 1 (`hosts.\"https://…@github.com\".token`)",
-        ),
-        (
-            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw\\u0040github.com\" = \"x\"",
-            "line 3 (`\"https://…@github.com\"`), column 1: \
-             unknown field `https://…@github.com`, expected `token`",
-        ),
-        // A key toml can't read is named by its place alone.
-        (
-            "[hosts]\n\"https://user:secretpw\\q\\u0040github.com\" = \"x\"",
-            "line 2, column ",
-        ),
-    ];
-    for (config, expected) in cases {
-        assert_start_error_hides_credentials(config, expected).await;
-    }
-}
-
-#[tokio::test]
-async fn an_unknown_field_is_named_without_its_credentials() {
-    let cases = [
-        (
-            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw@github.com\" = \"x\"",
-            "line 3 (`\"https://…@github.com\"`), column 1: \
-             unknown field `https://…@github.com`, expected `token`",
-        ),
-        (
-            "[\"https://user:secretpw@github.com\"]\ntoken = \"x\"",
-            "line 1, column 2: unknown field `https://…@github.com`, \
-             expected one of `interval`, `listen`, `repos`, `hosts`",
-        ),
-        (
-            "[\"https://user:sec`retpw@github.com\"]\ntoken = \"x\"",
-            "unknown field `https://…@github.com`, expected one of `interval`",
-        ),
-        (
-            "[\"user:secretpw@github.com\"]\ntoken = \"x\"",
-            "unknown field `…@github.com`, expected one of `interval`",
-        ),
-        (
-            "[\"user:secretpw@github.com/?x=://\"]\ntoken = \"x\"",
-            "unknown field `…@github.com/?x=://`, expected one of `interval`",
-        ),
-        (
-            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secret\\\"pw@github.com\" = \"x\"",
-            "line 3 (`\"https://…@github.com\"`), column 1: \
-             unknown field `https://…@github.com`, expected `token`",
-        ),
-        (
-            "[hosts.\"github.com\"]\ntoken = \"a\"\n'https://user:secret\"pw@github.com' = \"x\"",
-            "line 3 (`\"https://…@github.com\"`), column 1: \
-             unknown field `https://…@github.com`, expected `token`",
-        ),
-        (
-            "['https://user:secret\"pw@github.com']\ntoken = \"x\"",
-            "line 1, column 2: unknown field `https://…@github.com`, \
-             expected one of `interval`, `listen`, `repos`, `hosts`",
-        ),
-        (
-            "[hosts.\"github.com\"]\ntoken = \"a\"\n'https://user:secretpw\"@\"github.com' = \"x\"",
-            "line 3 (`\"https://…@\\\"github.com\"`), column 1: \
-             unknown field `https://…@\"github.com`, expected `token`",
-        ),
-        (
-            "[\"user:se://cretpw@github.com\"]\ntoken = \"x\"",
-            "line 1, column 2: unknown field `…@github.com`, \
-             expected one of `interval`, `listen`, `repos`, `hosts`",
-        ),
-    ];
-    for (config, expected) in cases {
-        assert_start_error_hides_credentials(config, expected).await;
-    }
-}
-
-#[tokio::test]
-async fn an_invalid_config_names_where_without_ever_quoting_a_token() {
-    let cases = [
-        (
-            "repos = []\n[hosts.\"github.com\"]\ntoken = \"ghp_secret\n",
-            &["line 3"][..],
-        ),
-        (
-            "[hosts]\n\"github.com\" = \"ghp_secret\"\n",
-            &["line 2", "invalid type"][..],
-        ),
-        // serde writes the value with `\"` escaped, which mustn't end it early.
-        (
-            "[hosts]\n\"github.com\" = \"ghp_\\\"secret`ab`cd\"\n",
-            &["line 2", "invalid type: string \"…\", expected"][..],
-        ),
-        (
-            "repos = \"https://user:ghp_\\\"secret`x`pw@github.com\"\n",
-            &["line 1", "invalid type: string \"…\", expected"][..],
-        ),
-    ];
-    for (config, expected) in cases {
-        let error = TestApp::start_error(config).await;
-        for leaked in ["secret", "`ab", "pw@", "user:"] {
-            assert!(
-                !error.contains(leaked),
-                "{config:?} shows {leaked:?}: {error}"
-            );
-        }
-        for expected in expected {
-            assert!(
-                error.contains(expected),
-                "config {config:?}: expected error to mention {expected:?}, got: {error}"
-            );
+        let (reason, page, logged) = hand_edit_error(config).await;
+        assert!(
+            ends_with_problem(&reason, expected),
+            "{config:?} in the warning:\n  expected …: {expected}\n  got        {reason}"
+        );
+        // The log quotes the error, escaping its quotes and backslashes.
+        let expected_logged = format!("{}\"", format!(": {expected}").escape_debug());
+        assert!(
+            logged.contains(&expected_logged),
+            "{config:?} in the log: expected {expected_logged}, got: {logged}"
+        );
+        for marker in MARKERS {
+            for (shown, what) in [(&at_start, "error"), (&page, "page"), (&logged, "log")] {
+                assert!(
+                    !shown.contains(marker),
+                    "{config:?}: the {what} shows {marker:?}: {shown}"
+                );
+            }
         }
     }
 }
