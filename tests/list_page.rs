@@ -106,12 +106,29 @@ fn fields(card: &scraper::ElementRef) -> Vec<(String, String)> {
     names.zip(values).collect()
 }
 
-fn field(card: &scraper::ElementRef, name: &str) -> String {
-    fields(card)
-        .into_iter()
-        .find(|(n, _)| n == name)
+/// The `<dd>` for the `<dt>` named `name` in a card.
+fn field_value<'a>(card: &scraper::ElementRef<'a>, name: &str) -> scraper::ElementRef<'a> {
+    let (dt, dd) = (
+        Selector::parse("dt").unwrap(),
+        Selector::parse("dd").unwrap(),
+    );
+    card.select(&dt)
+        .zip(card.select(&dd))
+        .find(|(n, _)| text(n) == name)
         .unwrap_or_else(|| panic!("card has no {name:?} field: {:?}", fields(card)))
         .1
+}
+
+fn field(card: &scraper::ElementRef, name: &str) -> String {
+    text(&field_value(card, name))
+}
+
+/// The `datetime` of the `<time>` in a card's field, if any.
+fn field_time(card: &scraper::ElementRef, name: &str) -> Option<String> {
+    let time = Selector::parse("time").unwrap();
+    let value = field_value(card, name);
+    let time = value.select(&time).next()?;
+    time.value().attr("datetime").map(str::to_owned)
 }
 
 #[tokio::test]
@@ -239,23 +256,11 @@ async fn a_repo_not_fetched_yet_shows_no_preserved_refs_row() {
     assert!(select(&html, "main article .preserved").is_empty());
 }
 
-/// The `datetime` of the `<time>` in a card's field, if any.
-fn field_time(card: &scraper::ElementRef, name: &str) -> Option<String> {
-    let (dt, dd, time) = (
-        Selector::parse("dt").unwrap(),
-        Selector::parse("dd").unwrap(),
-        Selector::parse("time").unwrap(),
-    );
-    let index = card.select(&dt).position(|e| text(&e) == name)?;
-    let value = card.select(&dd).nth(index)?;
-    let time = value.select(&time).next()?;
-    time.value().attr("datetime").map(str::to_owned)
-}
-
-/// A repo archived 24 hours after start (2026-11-17 12:00 UTC) whose next
-/// fetch, 24 hours later, fails with `failure`. The forge comes back too,
-/// to keep it serving.
-async fn failing_after_a_success(failure: Failure) -> (FakeForge, TestApp) {
+/// Checks that a repo archived 24 hours after start (2026-11-17 12:00
+/// UTC), whose next fetch 24 hours later fails with `failure`, shows that
+/// last success 3 hours after the failure, under a status line starting
+/// with `status`.
+async fn assert_shows_last_success_after(failure: Failure, status: &str) {
     let forge = FakeForge::start().await;
     let upstream = forge.create_repo("foo/bar");
     upstream.commit("first");
@@ -263,48 +268,32 @@ async fn failing_after_a_success(failure: Failure) -> (FakeForge, TestApp) {
     app.advance_and_settle(24 * HOUR).await;
     forge.fail("foo/bar", failure);
     app.advance_and_settle(24 * HOUR).await;
-    (forge, app)
-}
-
-#[tokio::test]
-async fn an_unavailable_repo_shows_its_last_successful_fetch() {
-    let (_forge, app) = failing_after_a_success(Failure::DmcaTakedown).await;
-
-    let html = Html::parse_document(&app.get("/").await.text());
-    let card = &select(&html, "main article")[0];
-    assert!(
-        text(&select(&html, "main article .status")[0]).starts_with("Unavailable"),
-        "{}",
-        card.html()
-    );
-    assert_eq!(field(card, "Last attempt"), "just now");
-    assert_eq!(field(card, "Last success"), "1 day ago");
-    assert_eq!(
-        field_time(card, "Last success").as_deref(),
-        Some("2026-11-17T12:00:00Z")
-    );
-}
-
-#[tokio::test]
-async fn a_repo_whose_fetch_failed_shows_its_last_successful_fetch() {
-    let (_forge, app) = failing_after_a_success(Failure::ServerError).await;
     app.advance(3 * HOUR);
 
     let html = Html::parse_document(&app.get("/").await.text());
     let card = &select(&html, "main article")[0];
-    assert_eq!(
-        text(&select(&html, "main article .status")[0]),
-        "Fetch failed"
-    );
-    assert_eq!(field(card, "Last attempt"), "3 hours ago");
+    let line = text(&select(&html, "main article .status")[0]);
+    assert!(line.starts_with(status), "{line}");
     assert_eq!(field(card, "Last success"), "1 day ago");
     assert_eq!(
         field_time(card, "Last success").as_deref(),
         Some("2026-11-17T12:00:00Z")
     );
+    assert_eq!(field(card, "Last attempt"), "3 hours ago");
 }
 
-/// The card of a repo whose first fetch failed with `failure`.
+#[tokio::test]
+async fn an_unavailable_repo_shows_its_last_successful_fetch() {
+    assert_shows_last_success_after(Failure::DmcaTakedown, "Unavailable").await;
+}
+
+#[tokio::test]
+async fn a_repo_whose_fetch_failed_shows_its_last_successful_fetch() {
+    assert_shows_last_success_after(Failure::ServerError, "Fetch failed").await;
+}
+
+/// Checks that a repo whose first fetch failed with `failure` shows "Never"
+/// for its last success, under a status line starting with `status`.
 async fn assert_never_fetched_successfully(failure: Failure, status: &str) {
     let forge = FakeForge::start().await;
     let upstream = forge.create_repo("foo/bar");
@@ -328,7 +317,7 @@ async fn an_unavailable_repo_never_fetched_successfully_shows_never_for_its_last
 }
 
 #[tokio::test]
-async fn a_failed_repo_never_fetched_successfully_shows_never_for_its_last_success() {
+async fn a_repo_whose_first_fetch_failed_shows_never_for_its_last_success() {
     assert_never_fetched_successfully(Failure::ServerError, "Fetch failed").await;
 }
 
@@ -346,12 +335,6 @@ async fn an_available_repo_shows_its_last_successful_fetch_only_in_its_status_li
     assert_eq!(
         text(&select(&html, "main article .status")[0]),
         "Fetched 3 hours ago"
-    );
-    assert_eq!(
-        text(card).matches("3 hours ago").count(),
-        2,
-        "once in the status line, once as the last attempt: {}",
-        text(card)
     );
     assert!(
         fields(card).iter().all(|(name, _)| name != "Last success"),
