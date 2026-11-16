@@ -170,8 +170,9 @@ impl TestApp {
         self.settle().await;
     }
 
-    /// Waits until the scheduler has run everything due at the current time,
-    /// which shows as its next fetch lying in the future.
+    /// Waits until the scheduler has run everything due at the current time:
+    /// it waits on the clock for nothing that is already due, and its next
+    /// fetch lies in the future (so it isn't stuck in a fetch either).
     pub async fn settle(&self) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -179,7 +180,7 @@ impl TestApp {
                 .metrics()
                 .await
                 .value("archiver_next_fetch_timestamp_seconds", &[]);
-            if next.is_some_and(|next| next > self.now() as f64) {
+            if self.clock.idle() && next.is_some_and(|next| next > self.now() as f64) {
                 return;
             }
             assert!(

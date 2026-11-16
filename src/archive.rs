@@ -139,14 +139,14 @@ async fn create_if_missing(archive: &Path) -> anyhow::Result<()> {
     let parent = archive.parent().expect("archive path has a parent");
     std::fs::create_dir_all(parent)
         .with_context(|| format!("couldn't create {}", parent.display()))?;
-    let staging = tempfile::Builder::new()
+    let new = tempfile::Builder::new()
         .prefix(".new-")
         .tempdir_in(parent)
         .with_context(|| format!("couldn't create a directory in {}", parent.display()))?;
-    git(staging.path(), &["init", "--quiet", "--bare"]).await?;
-    std::fs::rename(staging.path(), archive)
+    git(new.path(), &["init", "--quiet", "--bare"]).await?;
+    std::fs::rename(new.path(), archive)
         .with_context(|| format!("couldn't create archive {}", archive.display()))?;
-    let _ = staging.keep();
+    let _ = new.keep();
     Ok(())
 }
 
@@ -225,13 +225,17 @@ async fn git_with_input(dir: &Path, args: &[&str], input: &str) -> anyhow::Resul
         .spawn()
         .context("couldn't run git")?;
     let mut stdin = child.stdin.take().expect("stdin is piped");
-    stdin.write_all(input.as_bytes()).await?;
+    stdin
+        .write_all(input.as_bytes())
+        .await
+        .with_context(|| format!("couldn't send input to git {}", args[0]))?;
     drop(stdin);
     let output = child.wait_with_output().await.context("couldn't run git")?;
     if !output.status.success() {
         bail!(
-            "git {} failed: {}",
+            "git {} in {} failed: {}",
             args[0],
+            dir.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }

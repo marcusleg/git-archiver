@@ -6,6 +6,7 @@ pub mod clock;
 mod config;
 mod identity;
 mod metrics;
+mod overview;
 mod scheduler;
 mod state;
 mod web;
@@ -20,7 +21,8 @@ use tokio::task::JoinHandle;
 
 use crate::archive::Archives;
 use crate::clock::Clock;
-use crate::scheduler::{Scheduler, Snapshot};
+use crate::overview::Overview;
+use crate::scheduler::Scheduler;
 
 /// How to start the app.
 pub struct Options {
@@ -77,10 +79,10 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         .with_context(|| format!("couldn't listen on {listen}"))?;
     let addr = listener.local_addr()?;
 
-    let shared = Arc::new(Mutex::new(Snapshot {
-        tracked: scheduler::tracked(&config.repos),
+    let overview = Arc::new(Mutex::new(Overview {
+        tracked: overview::tracked(&config.repos),
         state,
-        ..Snapshot::default()
+        ..Overview::default()
     }));
     let archives = Arc::new(Archives::new(&data_dir));
     let scheduler = tokio::spawn(
@@ -91,7 +93,8 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
             state_path,
             interval: config.interval,
             started: options.clock.now(),
-            shared: shared.clone(),
+            overview: overview.clone(),
+            config_error: None,
         }
         .run(),
     );
@@ -100,7 +103,7 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         config_path: config::file_path(&data_dir),
         clock: options.clock,
         archives,
-        shared,
+        overview,
     }));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {

@@ -123,18 +123,19 @@ async fn a_repo_added_to_the_config_by_hand_is_fetched_from_the_next_fetch_on_an
     assert_eq!(last_successes(&app, &ids).await, [h(12), None, None]);
 
     app.write_config(&config_tracking(&urls(&repos)));
-    app.advance_and_settle(12 * HOUR).await;
+    app.advance_and_settle(8 * HOUR).await;
 
-    // Due at the old gap's time; never-attempted repos tie by config order.
-    assert_eq!(last_successes(&app, &ids).await, [h(12), h(24), None]);
+    // Due 24h / 3 after the last attempt; never-attempted repos tie by
+    // config order.
+    assert_eq!(last_successes(&app, &ids).await, [h(12), h(20), None]);
     let next = app
         .metrics()
         .await
         .value("archiver_next_fetch_timestamp_seconds", &[]);
-    assert_eq!(next, h(32).map(|t| t as f64), "gap is now 24h / 3");
+    assert_eq!(next, h(28).map(|t| t as f64));
 
     app.advance_and_settle(8 * HOUR).await;
-    assert_eq!(last_successes(&app, &ids).await, [h(12), h(24), h(32)]);
+    assert_eq!(last_successes(&app, &ids).await, [h(12), h(20), h(28)]);
 }
 
 #[tokio::test]
@@ -161,4 +162,27 @@ async fn a_failed_fetch_counts_as_an_attempt_and_the_next_repo_still_gets_its_tu
 
     app.advance_and_settle(12 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [None, h(24)]);
+}
+
+#[tokio::test]
+async fn a_fetch_that_hangs_is_stopped_after_an_hour_and_counts_as_an_attempt() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/stuck");
+    upstream.commit("first");
+    forge.hang("a/stuck");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    let start = app.now();
+    let id = format!("http://{}/a/stuck", forge.host());
+
+    app.advance(24 * HOUR);
+    forge.wait_for_hung_request().await;
+    app.advance_and_settle(HOUR).await;
+
+    let metrics = app.metrics().await;
+    assert_eq!(metrics.last_success(&id), None);
+    assert_eq!(
+        metrics.value("archiver_next_fetch_timestamp_seconds", &[]),
+        Some((start + 48 * 3600) as f64),
+        "the attempt at 24h counts"
+    );
 }
