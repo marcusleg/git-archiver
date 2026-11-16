@@ -160,9 +160,11 @@ fn parse(text: &str) -> anyhow::Result<Config> {
 
 /// Names the place and the problem but, unlike toml's own message, doesn't
 /// quote the line or any string value, either of which may be a token. Names
-/// the key instead, if the line sets one, with any credentials in it hidden.
+/// the key instead, if the line sets one, with any credentials in it hidden,
+/// and hides them in any field the message names too.
 fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let message = hide_strings(error.message().trim());
+    let message = hide_field_credentials(&message);
     let Some(span) = error.span() else {
         return anyhow::anyhow!("{message}");
     };
@@ -222,6 +224,18 @@ fn hide_strings(message: &str) -> String {
     hidden
 }
 
+/// Hides credentials in the field a message names, such as
+/// ``unknown field `https://user:pw@host`, expected `token` ``: everything
+/// from the first backtick to the last `@`. serde quotes the field as written,
+/// without escaping, so a backtick inside it can't be trusted to end it, but
+/// the names a message lists after it never hold an `@`.
+fn hide_field_credentials(message: &str) -> String {
+    match message.split_once('`') {
+        Some((before, field)) => format!("{before}`{}", hide_credentials(field)),
+        None => message.to_owned(),
+    }
+}
+
 fn parse_interval(text: &str) -> anyhow::Result<Duration> {
     let interval = humantime::parse_duration(text).with_context(|| {
         format!("`interval` must be a duration such as \"24h\" or \"90m\", got {text:?}")
@@ -247,14 +261,13 @@ fn validate_repo_url(repo: String) -> anyhow::Result<String> {
 /// differently than its author meant, such as one whose unencoded password
 /// holds a `#`.
 fn hide_credentials(text: &str) -> String {
-    let (scheme, rest) = match text.split_once("://") {
-        Some((scheme, rest)) => (format!("{scheme}://"), rest),
-        None => (String::new(), text),
+    let Some(at) = text.rfind('@') else {
+        return text.to_owned();
     };
-    match rest.rfind('@') {
-        Some(at) => format!("{scheme}…{}", &rest[at..]),
-        None => text.to_owned(),
-    }
+    // Only a `://` before the `@` starts a scheme; one after it may sit in
+    // the path or query, past any credentials.
+    let start = text[..at].find("://").map_or(0, |i| i + "://".len());
+    format!("{}…{}", &text[..start], &text[at..])
 }
 
 /// The repo's identity if the config would accept this URL; otherwise why

@@ -168,6 +168,40 @@ async fn a_rejected_hosts_key_is_named_without_its_credentials() {
 }
 
 #[tokio::test]
+async fn an_unknown_field_is_named_without_its_credentials() {
+    let cases = [
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw@github.com\" = \"x\"",
+            "line 3 (`\"https://…@github.com\"`), column 1: \
+             unknown field `https://…@github.com`, expected `token`",
+        ),
+        (
+            "[\"https://user:secretpw@github.com\"]\ntoken = \"x\"",
+            "line 1, column 2: unknown field `https://…@github.com`, \
+             expected one of `interval`, `listen`, `repos`, `hosts`",
+        ),
+        (
+            "[\"https://user:sec`retpw@github.com\"]\ntoken = \"x\"",
+            "unknown field `https://…@github.com`, expected one of `interval`",
+        ),
+        (
+            "[\"user:secretpw@github.com\"]\ntoken = \"x\"",
+            "unknown field `…@github.com`, expected one of `interval`",
+        ),
+        (
+            "[\"user:secretpw@github.com/?x=://\"]\ntoken = \"x\"",
+            "unknown field `…@github.com/?x=://`, expected one of `interval`",
+        ),
+    ];
+    for (config, expected) in cases {
+        let error = TestApp::start_error(config).await;
+        assert!(error.contains(expected), "{config:?}: {error}");
+        assert!(!error.contains("secretpw"), "{config:?}: {error}");
+        assert!(!error.contains("user:"), "{config:?}: {error}");
+    }
+}
+
+#[tokio::test]
 async fn an_invalid_config_names_where_without_ever_quoting_a_token() {
     let cases = [
         (
