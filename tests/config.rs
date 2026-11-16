@@ -356,7 +356,7 @@ token = "ghp_secretpw"
         ),
         // An unknown field named like a setting is shown, being no secret.
         (
-            "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\"\ninterval = 5",
+            "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\"\ninterval = \"ghp_secretpw\"",
             r#"line 3 (`hosts."github.com".interval`), column 1: unknown field `interval`, expected `token`"#.into(),
         ),
         // A token written as a key, or as a `hosts` key, which an error
