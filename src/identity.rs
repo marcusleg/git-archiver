@@ -6,7 +6,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Equality, hashing and ordering compare `<host>[:<port>]/<path>` only, so
+/// two identities are equal exactly when they share one archive; the scheme
+/// only shows in `as_str`.
+#[derive(Debug, Clone)]
 pub struct RepoId {
     /// `<scheme>://<host>[:<port>]/<path>`
     id: String,
@@ -66,15 +69,35 @@ impl RepoId {
         &self.host
     }
 
-    /// Whether the two identities share one archive, as URLs differing only
-    /// in scheme do.
-    pub fn same_archive(&self, other: &RepoId) -> bool {
-        self.host_and_path == other.host_and_path
-    }
-
     /// Where the archive lives, relative to `repos/`.
     pub fn archive_path(&self) -> PathBuf {
         PathBuf::from(format!("{}.git", self.host_and_path))
+    }
+}
+
+impl PartialEq for RepoId {
+    fn eq(&self, other: &Self) -> bool {
+        self.host_and_path == other.host_and_path
+    }
+}
+
+impl Eq for RepoId {}
+
+impl std::hash::Hash for RepoId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.host_and_path.hash(state);
+    }
+}
+
+impl PartialOrd for RepoId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RepoId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.host_and_path.cmp(&other.host_and_path)
     }
 }
 

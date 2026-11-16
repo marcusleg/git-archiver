@@ -81,3 +81,31 @@ async fn urls_with_the_same_repo_identity_share_one_archive() {
     let page = app.get("/").await.text();
     assert_eq!(page.matches("<article").count(), 1, "{page}");
 }
+
+#[tokio::test]
+async fn urls_differing_only_in_scheme_are_tracked_once() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/bar");
+    upstream.commit("first");
+    let other_scheme = upstream.url().replacen("http://", "https://", 1);
+    let app = TestApp::tracking(&[upstream.url(), &other_scheme]).await;
+    let start = app.now();
+
+    app.advance_and_settle(24 * HOUR).await;
+
+    let page = app.get("/").await.text();
+    assert_eq!(page.matches("<article").count(), 1, "{page}");
+    let metrics = app.metrics().await;
+    let id = format!("http://{}/foo/bar", forge.host());
+    assert_eq!(
+        metrics.last_success(&id),
+        Some(start + 24 * 3600),
+        "one repo, so a 24h gap"
+    );
+    let size_series = metrics
+        .samples()
+        .iter()
+        .filter(|s| s.name == "archiver_repo_size_bytes")
+        .count();
+    assert_eq!(size_series, 1);
+}
