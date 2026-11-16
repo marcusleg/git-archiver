@@ -1,0 +1,113 @@
+//! `/metrics`, as Prometheus scrapes it.
+
+mod common;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use common::forge::FakeForge;
+use common::{HOUR, Metrics, TestApp};
+
+/// Checks the Prometheus text exposition format (version 0.0.4): comment,
+/// TYPE and sample lines only; each family typed once, before its samples,
+/// and its samples grouped together.
+fn assert_valid_exposition(text: &str) {
+    let name_ok = |name: &str| {
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == ':')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+    };
+    assert!(text.ends_with('\n'), "ends with a newline");
+    let mut typed = BTreeMap::new();
+    let mut finished = BTreeSet::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# TYPE ") {
+            let (name, kind) = rest.split_once(' ').expect("TYPE has a kind");
+            assert!(name_ok(name), "bad metric name: {line}");
+            assert!(
+                ["counter", "gauge", "histogram", "summary", "untyped"].contains(&kind),
+                "bad type: {line}"
+            );
+            assert!(
+                typed.insert(name.to_owned(), kind.to_owned()).is_none(),
+                "typed twice: {line}"
+            );
+        } else if let Some(rest) = line.strip_prefix("# HELP ") {
+            let (name, _) = rest.split_once(' ').expect("HELP has text");
+            assert!(name_ok(name), "bad metric name: {line}");
+        } else if line.starts_with('#') {
+        } else {
+            assert!(!line.is_empty(), "no blank lines");
+            let name = line.split(['{', ' ']).next().unwrap();
+            assert!(name_ok(name), "bad metric name: {line}");
+            assert!(typed.contains_key(name), "sample before its TYPE: {line}");
+            if current.as_deref() != Some(name) {
+                if let Some(previous) = current.replace(name.to_owned()) {
+                    finished.insert(previous);
+                }
+                assert!(!finished.contains(name), "samples not grouped: {line}");
+            }
+        }
+    }
+    // Every sample line parses: name, quoted labels, float value.
+    Metrics::parse(text);
+}
+
+#[tokio::test]
+async fn metrics_report_last_success_size_next_fetch_and_fetch_duration() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/bar");
+    upstream.commit("first");
+    let app = TestApp::tracking(&[upstream.url(), "https://example.com/never/fetched"]).await;
+    let start = app.now();
+    app.advance_and_settle(12 * HOUR).await;
+
+    let page = app.get("/metrics").await;
+    assert_eq!(page.status, 200);
+    assert!(
+        page.content_type.starts_with("text/plain; version=0.0.4"),
+        "{}",
+        page.content_type
+    );
+    let text = page.text();
+    assert_valid_exposition(&text);
+    let metrics = Metrics::parse(&text);
+
+    let repo = format!("http://{}/foo/bar", forge.host());
+    let labels = [("repo", repo.as_str())];
+    assert_eq!(
+        metrics.value("archiver_repo_last_success_timestamp_seconds", &labels),
+        Some((start + 12 * 3600) as f64)
+    );
+    let size = metrics.value("archiver_repo_size_bytes", &labels).unwrap();
+    assert!(
+        size > 1000.0,
+        "a repo with a commit takes some space: {size}"
+    );
+    assert_eq!(
+        metrics.value("archiver_next_fetch_timestamp_seconds", &[]),
+        Some((start + 24 * 3600) as f64)
+    );
+    let duration = metrics
+        .value("archiver_fetch_duration_seconds", &[])
+        .unwrap();
+    assert!((0.0..60.0).contains(&duration), "{duration}");
+
+    let never = [("repo", "https://example.com/never/fetched")];
+    assert_eq!(
+        metrics.value("archiver_repo_last_success_timestamp_seconds", &never),
+        None
+    );
+    assert_eq!(metrics.value("archiver_repo_size_bytes", &never), None);
+}
+
+#[tokio::test]
+async fn metrics_are_valid_before_anything_is_fetched() {
+    let app = TestApp::start().await;
+
+    let text = app.get("/metrics").await.text();
+    assert_valid_exposition(&text);
+    assert!(Metrics::parse(&text).samples().is_empty(), "{text}");
+}

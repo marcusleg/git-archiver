@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
 use tokio::signal::unix::{SignalKind, signal};
@@ -36,6 +37,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let mut app = git_archiver::start(git_archiver::Options {
         data_dir: cli.data_dir,
         listen: None,
+        clock: Arc::new(git_archiver::clock::SystemClock),
     })
     .await?;
 

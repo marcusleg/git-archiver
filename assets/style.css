@@ -181,8 +181,13 @@ main {
   color: var(--muted);
 }
 
-.count {
+.count,
+.num {
   font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--muted);
 }
 
 .repos {
@@ -209,6 +214,41 @@ main {
   font-weight: 700;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+}
+
+.status.available .icon {
+  color: var(--accent-green);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-3) var(--space-4);
+  margin: var(--space-4) 0 0;
+}
+
+.facts > div {
+  min-width: 0;
+}
+
+.facts dt {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
 }
 
 /* Empty state */

@@ -1,16 +1,28 @@
 //! Test harness: runs the whole app in-process on a random port against a
-//! temporary data directory, and talks to it over HTTP.
+//! temporary data directory and a clock the test controls, and talks to it
+//! over HTTP.
 
 #![allow(dead_code)]
 
+pub mod clock;
+pub mod forge;
+pub mod git;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use git_archiver::{Options, RunningApp};
 use tempfile::TempDir;
 
+use clock::ManualClock;
+
+pub const HOUR: Duration = Duration::from_secs(3600);
+
 pub struct TestApp {
     dir: TempDir,
+    clock: Arc<ManualClock>,
     app: Option<RunningApp>,
 }
 
@@ -26,45 +38,85 @@ impl Page {
     }
 }
 
+/// A config tracking the given repo URLs, with every other setting at its
+/// default.
+pub fn config_tracking(urls: &[&str]) -> String {
+    let repos: Vec<String> = urls.iter().map(|url| format!("  {url:?},\n")).collect();
+    format!("repos = [\n{}]\n", repos.concat())
+}
+
 impl TestApp {
     /// Starts the app against an empty data directory.
     pub async fn start() -> Self {
-        let dir = TempDir::new().unwrap();
-        let mut app = Self { dir, app: None };
-        app.boot().await.expect("app starts");
-        app
+        let app = Self::new();
+        app.launch().await
     }
 
     /// Starts the app against a data directory holding the given `config.toml`.
     pub async fn with_config(config: &str) -> Self {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("config.toml"), config).unwrap();
-        let mut app = Self { dir, app: None };
-        app.boot().await.expect("app starts");
-        app
+        let app = Self::new();
+        app.write_config(config);
+        app.launch().await
+    }
+
+    /// Starts the app tracking the given repo URLs.
+    pub async fn tracking(urls: &[&str]) -> Self {
+        Self::with_config(&config_tracking(urls)).await
     }
 
     /// Tries to start the app against a data directory holding the given
     /// `config.toml`, returning the startup error.
     pub async fn start_error(config: &str) -> String {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("config.toml"), config).unwrap();
-        match git_archiver::start(options(dir.path())).await {
+        let app = Self::new();
+        app.write_config(config);
+        match git_archiver::start(app.options()).await {
             Ok(_) => panic!("app started with an invalid config"),
             Err(e) => format!("{e:#}"),
         }
     }
 
+    fn new() -> Self {
+        Self {
+            dir: TempDir::new().unwrap(),
+            clock: ManualClock::new(),
+            app: None,
+        }
+    }
+
+    async fn launch(mut self) -> Self {
+        self.boot().await.expect("app starts");
+        self
+    }
+
     async fn boot(&mut self) -> anyhow::Result<()> {
-        self.app = Some(git_archiver::start(options(self.dir.path())).await?);
+        self.app = Some(git_archiver::start(self.options()).await?);
         Ok(())
     }
 
+    /// Binds to a random local port, overriding the config's `listen`.
+    fn options(&self) -> Options {
+        Options {
+            data_dir: self.dir.path().to_owned(),
+            listen: Some("127.0.0.1:0".parse().unwrap()),
+            clock: self.clock.clone(),
+        }
+    }
+
     /// Stops the app and starts it again against the same data directory.
+    /// The clock keeps its time.
     pub async fn restart(&mut self) {
+        self.stop().await;
+        self.boot().await.expect("app restarts");
+    }
+
+    pub async fn stop(&mut self) {
         if let Some(app) = self.app.take() {
             app.shutdown().await;
         }
+    }
+
+    /// Starts a stopped app again against the same data directory.
+    pub async fn start_again(&mut self) {
         self.boot().await.expect("app restarts");
     }
 
@@ -84,8 +136,65 @@ impl TestApp {
         std::fs::write(self.config_path(), config).unwrap();
     }
 
+    /// The archive of a repo, by host and path: `repos/<host>/<path>.git`.
+    pub fn archive(&self, host_and_path: &str) -> PathBuf {
+        self.dir
+            .path()
+            .join("repos")
+            .join(format!("{host_and_path}.git"))
+    }
+
     pub fn addr(&self) -> SocketAddr {
         self.app.as_ref().expect("app is running").addr()
+    }
+
+    /// The test clock's current time, in Unix seconds.
+    pub fn now(&self) -> u64 {
+        use git_archiver::clock::Clock;
+        self.clock
+            .now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Moves the clock forward without waiting for the app to react.
+    pub fn advance(&self, by: Duration) {
+        self.clock.advance(by);
+    }
+
+    /// Moves the clock forward, then waits until every fetch due by then has
+    /// run.
+    pub async fn advance_and_settle(&self, by: Duration) {
+        self.advance(by);
+        self.settle().await;
+    }
+
+    /// Waits until the scheduler has run everything due at the current time,
+    /// which shows as its next fetch lying in the future.
+    pub async fn settle(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let next = self
+                .metrics()
+                .await
+                .value("archiver_next_fetch_timestamp_seconds", &[]);
+            if next.is_some_and(|next| next > self.now() as f64) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "scheduler didn't settle; next fetch at {next:?}, now {}",
+                self.now()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    pub async fn metrics(&self) -> Metrics {
+        let page = self.get("/metrics").await;
+        assert_eq!(page.status, 200);
+        Metrics::parse(&page.text())
     }
 
     pub async fn get(&self, path: &str) -> Page {
@@ -106,10 +215,101 @@ impl TestApp {
     }
 }
 
-/// Binds to a random local port, overriding the config's `listen`.
-fn options(data_dir: &Path) -> Options {
-    Options {
-        data_dir: data_dir.to_owned(),
-        listen: Some("127.0.0.1:0".parse().unwrap()),
+/// Samples from a Prometheus text exposition.
+pub struct Metrics {
+    pub text: String,
+    samples: Vec<Sample>,
+}
+
+pub struct Sample {
+    pub name: String,
+    pub labels: Vec<(String, String)>,
+    pub value: f64,
+}
+
+impl Metrics {
+    pub fn parse(text: &str) -> Self {
+        let samples = text
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(parse_sample)
+            .collect();
+        Self {
+            text: text.to_owned(),
+            samples,
+        }
+    }
+
+    pub fn samples(&self) -> &[Sample] {
+        &self.samples
+    }
+
+    /// The value of the sample with exactly these labels.
+    pub fn value(&self, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        self.samples
+            .iter()
+            .find(|s| {
+                s.name == name
+                    && s.labels.len() == labels.len()
+                    && labels
+                        .iter()
+                        .all(|(k, v)| s.labels.iter().any(|(sk, sv)| sk == k && sv == v))
+            })
+            .map(|s| s.value)
+    }
+
+    /// When the repo was last fetched successfully, in Unix seconds.
+    pub fn last_success(&self, repo: &str) -> Option<u64> {
+        self.value(
+            "archiver_repo_last_success_timestamp_seconds",
+            &[("repo", repo)],
+        )
+        .map(|v| v as u64)
+    }
+}
+
+/// Parses `name{label="value",...} value`, unescaping label values.
+fn parse_sample(line: &str) -> Sample {
+    let (series, value) = line.rsplit_once(' ').expect("sample has a value");
+    let value = value
+        .parse()
+        .unwrap_or_else(|_| panic!("bad value: {line}"));
+    let Some((name, rest)) = series.split_once('{') else {
+        return Sample {
+            name: series.to_owned(),
+            labels: Vec::new(),
+            value,
+        };
+    };
+    let mut labels = Vec::new();
+    let mut chars = rest.strip_suffix('}').expect("labels close").chars();
+    loop {
+        let key: String = chars.by_ref().take_while(|c| *c != '=').collect();
+        if key.is_empty() {
+            break;
+        }
+        assert_eq!(chars.next(), Some('"'), "label value is quoted: {line}");
+        let mut value = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => break,
+                '\\' => match chars.next() {
+                    Some('n') => value.push('\n'),
+                    Some(c) => value.push(c),
+                    None => panic!("dangling escape: {line}"),
+                },
+                c => value.push(c),
+            }
+        }
+        labels.push((key, value));
+        match chars.next() {
+            Some(',') | None => {}
+            Some(c) => panic!("unexpected {c:?} after label: {line}"),
+        }
+    }
+    Sample {
+        name: name.to_owned(),
+        labels,
+        value,
     }
 }
