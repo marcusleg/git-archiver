@@ -23,7 +23,7 @@ An archive still on disk whose repo is no longer tracked. Tracking the same repo
 _Avoid_: orphan, stale archive
 
 **Repo identity**:
-A repo's normalized URL: host lowercased, trailing `.git` and slashes ignored. Two URLs with the same identity are the same repo and share one archive.
+A repo's normalized URL. Scheme, host case, trailing `.git` and slashes are ignored, so `http://` and `https://` name the same repo. Two URLs with the same identity are the same repo and share one archive.
 
 ### Change detection
 

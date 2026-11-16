@@ -132,7 +132,7 @@ impl Overview {
     pub fn forget(&mut self, id: &RepoId) {
         self.state
             .repos
-            .retain(|key, _| RepoId::from_url(key).map_or(true, |other| !other.same_archive(id)));
+            .retain(|key, _| RepoId::from_url(key).map_or(true, |other| other != *id));
     }
 
     /// Each tracked repo with its state, if it has any yet.

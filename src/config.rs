@@ -677,7 +677,7 @@ fn remove_formatted(array: &mut Array, index: usize) {
 
 /// Whether the config entry `repo` has the archive of `id`.
 fn shares_archive(repo: &str, id: &RepoId) -> bool {
-    RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id))
+    RepoId::from_url(repo).is_ok_and(|other| other == *id)
 }
 
 /// The config's text and contents.
