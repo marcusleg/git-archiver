@@ -59,6 +59,14 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
             "repos = [\"https://user:secret@example.com/foo/bar\"]",
             "must not contain credentials",
         ),
+        (
+            "repos = [\"https://example.com/foo//bar\"]",
+            "unsupported repository path",
+        ),
+        (
+            "repos = [\"https://example.com/foo.git/bar\"]",
+            "unsupported repository path",
+        ),
         ("intervall = \"24h\"", "intervall"),
         (
             "[hosts.\"github.com\"]\ntoken = \"\"",

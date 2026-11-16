@@ -9,11 +9,12 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
+use crate::identity::RepoId;
+
 const DEFAULT_CONFIG: &str = include_str!("default_config.toml");
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    #[expect(dead_code, reason = "validated now; the scheduler uses it")]
     pub interval: Duration,
     pub listen: SocketAddr,
     pub repos: Vec<String>,
@@ -135,6 +136,7 @@ fn validate_repo_url(repo: String) -> anyhow::Result<String> {
     if url.path().trim_matches('/').is_empty() {
         bail!("`repos` entry {repo:?} has no repository path");
     }
+    RepoId::from_url(&repo).with_context(|| format!("`repos` entry {repo:?} can't be archived"))?;
     Ok(repo)
 }
 

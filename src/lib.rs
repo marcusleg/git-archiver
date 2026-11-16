@@ -1,31 +1,44 @@
 //! Git Archiver: keeps local copies of public git repositories so their
 //! history survives takedowns, deletions and rewrites upstream.
 
+mod archive;
+pub mod clock;
 mod config;
+mod identity;
+mod metrics;
+mod scheduler;
+mod state;
 mod web;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::archive::Archives;
+use crate::clock::Clock;
+use crate::scheduler::{Scheduler, Snapshot};
+
 /// How to start the app.
 pub struct Options {
-    /// Holds `config.toml` (later also `state.json` and `repos/`).
+    /// Holds `config.toml`, `state.json` and the archives under `repos/`.
     pub data_dir: PathBuf,
     /// Overrides the config's `listen` address. Tests use this to bind a
     /// random port; the binary never sets it.
     pub listen: Option<SocketAddr>,
+    /// Where the app reads the time. Tests replace the system clock.
+    pub clock: Arc<dyn Clock>,
 }
 
-/// A started app, serving HTTP until shut down.
+/// A started app, serving HTTP and fetching on schedule until shut down.
 pub struct RunningApp {
     addr: SocketAddr,
     shutdown: oneshot::Sender<()>,
     server: JoinHandle<std::io::Result<()>>,
+    scheduler: JoinHandle<()>,
 }
 
 impl RunningApp {
@@ -34,8 +47,11 @@ impl RunningApp {
         self.addr
     }
 
-    /// Stops serving and waits for the server to finish.
+    /// Stops fetching and serving, and waits for both to finish. A fetch in
+    /// progress is killed; the next start picks up from the saved state.
     pub async fn shutdown(self) {
+        self.scheduler.abort();
+        let _ = self.scheduler.await;
         let _ = self.shutdown.send(());
         let _ = self.server.await;
     }
@@ -48,18 +64,43 @@ impl RunningApp {
     }
 }
 
-/// Prepares the data directory, loads the config and starts serving.
+/// Prepares the data directory, loads the config and state, and starts
+/// serving and fetching.
 pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
-    let config = config::load_or_init(&options.data_dir)?;
+    let data_dir = options.data_dir;
+    let config = config::load_or_init(&data_dir)?;
+    let state_path = state::file_path(&data_dir);
+    let state = state::load(&state_path)?;
     let listen = options.listen.unwrap_or(config.listen);
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("couldn't listen on {listen}"))?;
     let addr = listener.local_addr()?;
 
+    let shared = Arc::new(Mutex::new(Snapshot {
+        tracked: scheduler::tracked(&config.repos),
+        state,
+        ..Snapshot::default()
+    }));
+    let archives = Arc::new(Archives::new(&data_dir));
+    let scheduler = tokio::spawn(
+        Scheduler {
+            clock: options.clock.clone(),
+            archives: archives.clone(),
+            config_path: config::file_path(&data_dir),
+            state_path,
+            interval: config.interval,
+            started: options.clock.now(),
+            shared: shared.clone(),
+        }
+        .run(),
+    );
+
     let router = web::router(Arc::new(web::AppState {
-        config,
-        config_path: config::file_path(&options.data_dir),
+        config_path: config::file_path(&data_dir),
+        clock: options.clock,
+        archives,
+        shared,
     }));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -75,5 +116,6 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         addr,
         shutdown,
         server,
+        scheduler,
     })
 }
