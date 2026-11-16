@@ -217,6 +217,28 @@ async fn a_token_applies_to_its_host_whatever_the_case() {
 }
 
 #[tokio::test]
+async fn a_token_isnt_sent_to_a_subdomain_of_its_host_or_to_its_host_on_another_port() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("public/repo");
+    let tip = upstream.commit("first");
+    let port = forge.host().rsplit_once(':').unwrap().1.to_owned();
+    // `*.localhost` resolves to the loopback address, so this reaches the forge.
+    let url = format!("http://api.localhost:{port}/public/repo.git");
+    let config = format!(
+        "{}\n[hosts.\"localhost:{port}\"]\ntoken = {TOKEN:?}\n\
+         [hosts.\"api.localhost\"]\ntoken = {WRONG_TOKEN:?}\n",
+        config_tracking(&[&url])
+    );
+    let app = TestApp::with_config(&config).await;
+
+    app.advance_and_settle(24 * HOUR).await;
+
+    let archive = app.archive(&format!("api.localhost:{port}/public/repo"));
+    assert_eq!(refs(&archive)["refs/heads/main"], tip);
+    assert_eq!(forge.authorizations(), Vec::<String>::new());
+}
+
+#[tokio::test]
 async fn changing_the_token_in_the_config_takes_effect_from_the_next_fetch() {
     let forge = FakeForge::start().await;
     forge.require_token(TOKEN);

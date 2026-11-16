@@ -2,8 +2,12 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::forge::{Failure, FakeForge, Upstream};
 use common::{HOUR, TestApp, config_tracking};
+
+const MINUTE: Duration = Duration::from_secs(60);
 
 /// Three upstream repos with one commit each, and their repo identities.
 fn three_repos(forge: &FakeForge) -> (Vec<Upstream>, Vec<String>) {
@@ -136,6 +140,42 @@ async fn a_repo_added_to_the_config_by_hand_is_fetched_from_the_next_fetch_on_an
 
     app.advance_and_settle(8 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [h(12), h(20), h(28)]);
+}
+
+#[tokio::test]
+async fn a_repo_removed_from_the_config_by_hand_widens_the_gap_from_the_next_fetch_on() {
+    let forge = FakeForge::start().await;
+    let (repos, ids) = three_repos(&forge);
+    let app = TestApp::tracking(&urls(&repos)).await;
+    let start = app.now();
+    let h = |hours: u64| Some(start + hours * 3600);
+    app.advance_and_settle(8 * HOUR).await;
+    assert_eq!(last_successes(&app, &ids).await, [h(8), None, None]);
+    let next = app
+        .metrics()
+        .await
+        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    assert_eq!(
+        next,
+        h(16).map(|t| t as f64),
+        "24h / 3 after the last attempt"
+    );
+
+    app.write_config(&config_tracking(&urls(&repos[..2])));
+    app.advance_and_settle(MINUTE).await;
+
+    let next = app
+        .metrics()
+        .await
+        .value("archiver_next_fetch_timestamp_seconds", &[]);
+    assert_eq!(
+        next,
+        h(20).map(|t| t as f64),
+        "24h / 2 after the last attempt"
+    );
+
+    app.advance_and_settle(12 * HOUR - MINUTE).await;
+    assert_eq!(last_successes(&app, &ids).await, [h(8), h(20), None]);
 }
 
 #[tokio::test]
