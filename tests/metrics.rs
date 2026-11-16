@@ -107,6 +107,11 @@ async fn metrics_report_status_last_success_size_next_fetch_and_fetch_duration()
         metrics.repo_status("https://example.com/never/fetched"),
         None
     );
+    assert_eq!(metrics.value("archiver_repo_preserved_refs", &never), None);
+    assert_eq!(
+        metrics.value("archiver_repo_preserved_refs", &labels),
+        Some(0.0)
+    );
 }
 
 #[tokio::test]
@@ -125,11 +130,46 @@ async fn metrics_are_valid_before_anything_is_fetched() {
         samples,
         [
             ("archiver_fetch_errors_total", 0.0),
-            ("archiver_fetch_errors_total", 0.0)
+            ("archiver_fetch_errors_total", 0.0),
+            ("archiver_rewrites_total", 0.0),
         ],
-        "only the error counters, at 0: {text}"
+        "only the counters, at 0: {text}"
     );
     assert_eq!(metrics.fetch_errors("unavailable"), Some(0.0));
     assert_eq!(metrics.fetch_errors("fetch_failed"), Some(0.0));
     assert!(text.contains("# TYPE archiver_fetch_errors_total counter\n"));
+}
+
+#[tokio::test]
+async fn metrics_count_preserved_refs_per_repo_and_rewrites() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/bar");
+    upstream.commit("first");
+    upstream.tag("v1");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    let repo = format!("http://{}/foo/bar", forge.host());
+    let labels = [("repo", repo.as_str())];
+    let preserved = "archiver_repo_preserved_refs";
+
+    let metrics = app.metrics().await;
+    assert_eq!(metrics.value(preserved, &labels), Some(0.0));
+    assert_eq!(metrics.value("archiver_rewrites_total", &[]), Some(0.0));
+
+    upstream.force_push_new_history("rewritten");
+    upstream.move_tag("v1");
+    app.advance_and_settle(24 * HOUR).await;
+    upstream.delete_tag("v1");
+    app.advance_and_settle(24 * HOUR).await;
+    app.advance_and_settle(24 * HOUR).await;
+
+    let text = app.get("/metrics").await.text();
+    assert_valid_exposition(&text);
+    assert!(
+        text.contains("# TYPE archiver_rewrites_total counter"),
+        "{text}"
+    );
+    let metrics = Metrics::parse(&text);
+    assert_eq!(metrics.value(preserved, &labels), Some(3.0));
+    assert_eq!(metrics.value("archiver_rewrites_total", &[]), Some(2.0));
 }

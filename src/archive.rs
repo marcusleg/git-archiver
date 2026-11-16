@@ -2,10 +2,12 @@
 //! created and updated only through the `git` CLI (ADR-0001).
 //!
 //! A fetch works in two steps. It first brings upstream's default branch and
-//! tags into a staging namespace inside the archive, then moves the archived
-//! refs to the staged state in one transaction and clears staging. A fetch
-//! interrupted in between leaves only staging refs behind, which the next
-//! fetch clears first.
+//! tags into a staging namespace inside the archive. Then, in one ref
+//! transaction, it keeps every archived tip a rewrite would lose as a
+//! preserved ref (ADR-0002), moves the archived refs to the staged state and
+//! clears staging. A fetch interrupted before that transaction leaves only
+//! staging refs behind, which the next fetch clears first; the transaction
+//! itself applies whole or not at all.
 //!
 //! A failed fetch is classified from git's exit and stderr alone (ADR-0001):
 //! upstream refusing the repo makes it Unavailable, anything else is a
@@ -16,6 +18,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::SystemTime;
 
 use anyhow::{Context, bail};
 use tokio::io::AsyncWriteExt;
@@ -26,6 +29,7 @@ use crate::state::Status;
 
 /// Where a fetch stages upstream's refs. Never meant for clients.
 pub(crate) const STAGING: &str = "refs/staging/";
+const PRESERVED: &str = "refs/preserved/";
 
 pub struct Archives {
     root: PathBuf,
@@ -37,6 +41,9 @@ pub struct Inspection {
     /// Only set once the archive holds that branch.
     pub default_branch: Option<String>,
     pub tip: Option<String>,
+    /// By name, so oldest first, with the object each holds. `None` until
+    /// the archive exists.
+    pub preserved: Option<BTreeMap<String, String>>,
 }
 
 /// Why a fetch failed. Neither kind touches the archive's refs.
@@ -141,11 +148,17 @@ impl Archives {
     }
 
     /// Clones the repo into its archive, or updates the archive from
-    /// upstream. Only adds history: archived refs move only by fast-forward,
-    /// and refs upstream deleted or rewrote stay as they are. A repo upstream
-    /// refuses on its first fetch gets no archive.
-    pub async fn fetch(&self, id: &RepoId, url: &str) -> Result<(), FetchError> {
-        self.try_fetch(id, url).await.map_err(|e| {
+    /// upstream. Before an archived ref moves or goes in a way that would
+    /// lose history (a rewrite), its old tip is kept as a preserved ref under
+    /// `refs/preserved/<now>/`. Returns the preserved refs it created. A repo
+    /// upstream refuses on its first fetch gets no archive.
+    pub async fn fetch(
+        &self,
+        id: &RepoId,
+        url: &str,
+        now: SystemTime,
+    ) -> Result<Vec<String>, FetchError> {
+        self.try_fetch(id, url, now).await.map_err(|e| {
             e.downcast::<FetchError>()
                 .unwrap_or_else(|e| FetchError::Failed {
                     reason: format!("{e:#}"),
@@ -153,7 +166,12 @@ impl Archives {
         })
     }
 
-    async fn try_fetch(&self, id: &RepoId, url: &str) -> anyhow::Result<()> {
+    async fn try_fetch(
+        &self,
+        id: &RepoId,
+        url: &str,
+        now: SystemTime,
+    ) -> anyhow::Result<Vec<String>> {
         let archive = self.path(id);
         let default_branch = upstream_default_branch(url).await?;
         create_if_missing(&archive).await?;
@@ -176,60 +194,92 @@ impl Archives {
 
         let staged = list_refs(&archive, &[STAGING]).await?;
         let archived = list_refs(&archive, &["refs/heads/", "refs/tags/"]).await?;
+        let upstream: BTreeMap<String, &str> = staged
+            .iter()
+            .map(|(name, sha)| (format!("refs/{}", &name[STAGING.len()..]), sha.as_str()))
+            .collect();
+        let default_ref = default_branch.as_ref().map(|b| format!("refs/heads/{b}"));
+        let stamp = ref_timestamp(now);
+
+        // One transaction: preserved refs, archived refs and clearing staging
+        // all happen, or none do.
         let mut transaction = String::new();
-        for (staged_ref, new) in &staged {
-            let target = format!("refs/{}", &staged_ref[STAGING.len()..]);
-            match archived.get(&target) {
-                None => transaction.push_str(&format!("create {target} {new}\n")),
-                Some(old) if old == new => {}
-                Some(old)
-                    if target.starts_with("refs/heads/")
-                        && is_ancestor(&archive, old, new).await? =>
-                {
-                    transaction.push_str(&format!("update {target} {new} {old}\n"));
+        let mut preserved = Vec::new();
+        for (name, old) in &archived {
+            let new = upstream.get(name).copied();
+            let rewritten = match new {
+                Some(new) if new == old.as_str() => continue,
+                Some(new) if name.starts_with("refs/heads/") => {
+                    !is_ancestor(&archive, old, new).await?
                 }
-                Some(old) => tracing::warn!(
-                    repo = %id,
-                    r#ref = target,
-                    archived = old,
-                    upstream = new,
-                    "upstream rewrote a ref; keeping the archived one",
-                ),
+                // The default branch moved away from this branch. Upstream
+                // with no commits advertises no default branch; its branches
+                // stay as they are.
+                None if name.starts_with("refs/heads/") && default_ref.is_none() => continue,
+                _ => true,
+            };
+            if rewritten {
+                let keep = format!("{PRESERVED}{stamp}/{}", &name["refs/".len()..]);
+                transaction.push_str(&format!("create {keep} {old}\n"));
+                preserved.push(keep);
             }
-            transaction.push_str(&format!("delete {staged_ref} {new}\n"));
+            match new {
+                Some(new) => transaction.push_str(&format!("update {name} {new} {old}\n")),
+                None => transaction.push_str(&format!("delete {name} {old}\n")),
+            }
+        }
+        for (name, new) in &upstream {
+            if !archived.contains_key(name) {
+                transaction.push_str(&format!("create {name} {new}\n"));
+            }
+        }
+        for (name, sha) in &staged {
+            transaction.push_str(&format!("delete {name} {sha}\n"));
         }
         git_with_input(&archive, &["update-ref", "--stdin"], &transaction).await?;
 
-        if let Some(branch) = &default_branch {
-            git(
-                &archive,
-                &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
-            )
-            .await?;
+        if let Some(default_ref) = &default_ref {
+            git(&archive, &["symbolic-ref", "HEAD", default_ref]).await?;
         }
-        Ok(())
+        Ok(preserved)
     }
 
-    /// Reads the default branch and its tip from the archive, if there is one.
+    /// Reads the default branch, its tip and the preserved refs from the
+    /// archive, if there is one.
     pub async fn inspect(&self, id: &RepoId) -> anyhow::Result<Inspection> {
         let archive = self.path(id);
         if !archive.exists() {
             return Ok(Inspection::default());
         }
+        let preserved = Some(list_refs(&archive, &[PRESERVED]).await?);
         let head = git(&archive, &["symbolic-ref", "HEAD"]).await?;
         let head = head.trim();
         let Some(tip) = rev_parse(&archive, head).await? else {
-            return Ok(Inspection::default());
+            return Ok(Inspection {
+                preserved,
+                ..Inspection::default()
+            });
         };
         Ok(Inspection {
             default_branch: head.strip_prefix("refs/heads/").map(str::to_owned),
             tip: Some(tip),
+            preserved,
         })
     }
 
     /// Whether the repo has an archive on disk yet.
     pub fn exists(&self, id: &RepoId) -> bool {
         self.path(id).exists()
+    }
+
+    /// The archive's preserved refs by name (so oldest first) with the object
+    /// each holds, or `None` if there is no archive yet.
+    pub async fn preserved(&self, id: &RepoId) -> anyhow::Result<Option<BTreeMap<String, String>>> {
+        let archive = self.path(id);
+        if !archive.exists() {
+            return Ok(None);
+        }
+        Ok(Some(list_refs(&archive, &[PRESERVED]).await?))
     }
 
     /// The archive's size on disk in bytes, if it exists.
@@ -314,6 +364,13 @@ async fn upstream_default_branch(url: &str) -> anyhow::Result<Option<String>> {
         None if output.trim().is_empty() => Ok(None),
         None => bail!("upstream doesn't say which branch its HEAD points at"),
     }
+}
+
+/// A UTC time that is safe in a ref name: `20261116T120000Z`.
+fn ref_timestamp(time: SystemTime) -> String {
+    humantime::format_rfc3339_seconds(time)
+        .to_string()
+        .replace(['-', ':'], "")
 }
 
 async fn clear_staging(archive: &Path) -> anyhow::Result<()> {

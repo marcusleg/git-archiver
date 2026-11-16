@@ -127,7 +127,7 @@ impl Scheduler {
         let timer = Instant::now();
         tracing::info!(repo = %repo.id, "fetching");
         let result = tokio::select! {
-            result = self.archives.fetch(&repo.id, &repo.url) => result,
+            result = self.archives.fetch(&repo.id, &repo.url, attempt) => result,
             () = self.clock.sleep_until(attempt + FETCH_TIMEOUT) => Err(FetchError::Failed {
                 reason: format!(
                     "fetch timed out after {}",
@@ -142,6 +142,18 @@ impl Scheduler {
             let mut overview = self.overview.lock().unwrap();
             overview.last_fetch_duration = Some(duration);
             overview.fetch_first.retain(|id| *id != repo.id);
+            let (result, preserved) = match result {
+                Ok(preserved) => (Ok(()), preserved),
+                Err(e) => (Err(e), Vec::new()),
+            };
+            if !preserved.is_empty() {
+                overview.rewrites += 1;
+                tracing::warn!(
+                    repo = %repo.id,
+                    preserved = ?preserved,
+                    "upstream rewrote history; preserved the old tips",
+                );
+            }
             if let Err(e) = &result {
                 overview.fetch_errors.count(e.status());
             }

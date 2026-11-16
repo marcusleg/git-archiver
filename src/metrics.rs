@@ -1,5 +1,6 @@
 //! `/metrics`: Prometheus text exposition format, version 0.0.4.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,7 +9,10 @@ use crate::state::{RepoState, Status};
 
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-pub fn render(overview: &Overview) -> String {
+/// Renders every metric. `preserved_refs` holds the number of preserved refs
+/// in each tracked repo's archive, by repo identity, for the repos that have
+/// one.
+pub fn render(overview: &Overview, preserved_refs: &BTreeMap<String, usize>) -> String {
     let per_repo = |value: fn(&RepoState) -> Option<f64>| {
         overview
             .tracked_with_state()
@@ -47,6 +51,16 @@ pub fn render(overview: &Overview) -> String {
     );
     family(
         &mut out,
+        "archiver_repo_preserved_refs",
+        "gauge",
+        "Preserved refs in the repo's archive: tips kept from before rewrites.",
+        overview.tracked.iter().filter_map(|t| {
+            let count = preserved_refs.get(t.id.as_str())?;
+            Some((vec![("repo", t.id.as_str())], *count as f64))
+        }),
+    );
+    family(
+        &mut out,
         "archiver_next_fetch_timestamp_seconds",
         "gauge",
         "When the next fetch is due, in Unix seconds.",
@@ -72,6 +86,13 @@ pub fn render(overview: &Overview) -> String {
             (Status::FetchFailed, errors.fetch_failed),
         ]
         .map(|(status, count)| (vec![("status", status.as_str())], count as f64)),
+    );
+    family(
+        &mut out,
+        "archiver_rewrites_total",
+        "counter",
+        "Fetches that found a rewrite upstream and preserved the old tips, since the app started.",
+        [(vec![], overview.rewrites as f64)],
     );
     out
 }
