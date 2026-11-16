@@ -28,6 +28,7 @@ pub struct Config {
     pub tokens: Tokens,
 }
 
+/// A host's settings. Each field's name is in [`APP_NAMES`] too.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostConfig {
@@ -82,7 +83,7 @@ impl Tokens {
 }
 
 /// The config as written, with where each value the app checks itself sits,
-/// so that its error can say where.
+/// so that its error can say where. Each field's name is in [`APP_NAMES`] too.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -212,16 +213,14 @@ impl ConfigError {
     /// An error serde found in the parsed file `doc`, such as an unknown
     /// field or a value of the wrong type, naming the key it's at.
     fn after_parsing(doc: &DeTable<'_>, error: &toml::de::Error) -> Self {
-        let found = error.span().and_then(|span| key_at(doc, span.start));
-        let key = found.as_ref().and_then(|found| shown_key(&found.path));
-        let on_key = found
-            .as_ref()
-            .filter(|found| found.on_key)
-            .and_then(|found| found.path.last().copied());
+        let path = error.span().and_then(|span| key_at(doc, span.start));
         Self {
             span: error.span(),
-            key,
-            problem: hide_file_text(error.message(), on_key),
+            key: path.as_deref().and_then(shown_key),
+            problem: hide_file_text(
+                error.message(),
+                path.as_ref().and_then(|p| p.last().copied()),
+            ),
         }
     }
 
@@ -244,48 +243,39 @@ impl ConfigError {
     }
 }
 
-/// The keys leading to what sits at a place in the file, and whether the
-/// place is on the last key itself rather than on its value.
-struct KeyAt<'a> {
-    path: Vec<&'a str>,
-    on_key: bool,
-}
-
 /// The keys leading to the deepest key or value in `table` that holds byte
 /// `at`, if any does.
-fn key_at<'a>(table: &'a DeTable<'_>, at: usize) -> Option<KeyAt<'a>> {
+fn key_at<'a>(table: &'a DeTable<'_>, at: usize) -> Option<Vec<&'a str>> {
     for (key, value) in table {
         let name: &str = key.get_ref();
         if key.span().contains(&at) {
-            return Some(KeyAt {
-                path: vec![name],
-                on_key: true,
-            });
+            return Some(vec![name]);
         }
         // A table's span may cover only its header, so its keys are
         // searched whatever its span.
         if let Some(mut inner) = value.get_ref().as_table().and_then(|t| key_at(t, at)) {
-            inner.path.insert(0, name);
+            inner.insert(0, name);
             return Some(inner);
         }
         if value.span().contains(&at) {
-            return Some(KeyAt {
-                path: vec![name],
-                on_key: false,
-            });
+            return Some(vec![name]);
         }
     }
     None
 }
 
-/// The names the app gives its settings, which an error may always show.
+/// The names the app gives its settings, which an error may always show:
+/// the fields of [`RawConfig`] and [`HostConfig`].
 const APP_NAMES: [&str; 5] = ["interval", "listen", "repos", "hosts", "token"];
 
 /// What toml's syntax errors quote in backticks, none of it from the file:
-/// the punctuation and escape letters it expected.
-const TOML_TOKENS: [&str; 28] = [
-    "#", "'", ",", "-", "=", ".", "[", "]", "]]", "{", "}", "_", "\\", "\"", "\"\"\"", "'''", "0b",
-    "0o", "0x", "b", "e", "f", "n", "r", "t", "u", "U", "x",
+/// exactly the literals toml_parser 1.1.5 can say it expected (its
+/// `Expected::Literal`s), which are punctuation, escape letters, number
+/// prefixes and the words `true`, `false`, `inf` and `nan`. A newline it
+/// names in words, outside backticks.
+const TOML_TOKENS: [&str; 30] = [
+    "#", "'", ",", "-", "=", "[", "]", "]]", "{", "}", "_", "\\", "\"", "\"\"\"", "'''", "0b",
+    "0o", "0x", "b", "e", "f", "n", "r", "u", "U", "x", "true", "false", "inf", "nan",
 ];
 
 /// A key as an error may show it, such as `hosts."github.com".…`: each part
@@ -293,40 +283,37 @@ const TOML_TOKENS: [&str; 28] = [
 /// names, and `…` for any other part, which may be a credential. None if no
 /// part may be shown.
 fn shown_key(path: &[&str]) -> Option<String> {
-    let parts: Vec<Option<String>> = path
+    let mut any_shown = false;
+    let parts: Vec<String> = path
         .iter()
         .enumerate()
         .map(|(i, &part)| {
             // A `hosts` key is a host, whatever it's called.
-            if i == 1 && path[0] == "hosts" {
+            let shown = if i == 1 && path[0] == "hosts" {
                 shown_host(part)
-            } else if APP_NAMES.contains(&part) {
-                Some(part.to_owned())
             } else {
-                None
-            }
+                APP_NAMES.contains(&part).then(|| part.to_owned())
+            };
+            any_shown |= shown.is_some();
+            shown.unwrap_or_else(|| "…".to_owned())
         })
         .collect();
-    if parts.iter().all(Option::is_none) {
-        return None;
-    }
-    let parts: Vec<String> = parts
-        .into_iter()
-        .map(|part| part.unwrap_or_else(|| "…".to_owned()))
-        .collect();
-    Some(parts.join("."))
+    any_shown.then(|| parts.join("."))
 }
 
 /// toml's or serde's problem text with every piece it quotes from the file
 /// shown as `…`: each double-quoted string, which serde writes with Rust's
 /// escapes, and each backtick-quoted piece other than [`APP_NAMES`] and
 /// [`TOML_TOKENS`]. serde quotes an unknown field in backticks without
-/// escaping it, so `key`, the key the error is on, is hidden first, as a
-/// backtick inside it would end it early.
+/// escaping it, so `key`, the last key leading to where the error is, is
+/// hidden first if it holds a backtick, which would end it early. Any other
+/// key is hidden or shown like every other piece, so an error on a value
+/// may still quote an app name that is also its key, as in
+/// ``missing field `token` `` for `[hosts."token"]`.
 fn hide_file_text(message: &str, key: Option<&str>) -> String {
     let message = match key {
-        Some(key) => message.replacen(&format!("`{key}`"), "`…`", 1),
-        None => message.to_owned(),
+        Some(key) if key.contains('`') => message.replacen(&format!("`{key}`"), "`…`", 1),
+        _ => message.to_owned(),
     };
     let mut shown = String::new();
     let mut rest = message.trim();
