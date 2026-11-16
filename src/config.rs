@@ -257,13 +257,10 @@ fn hide_quoted(message: &str) -> String {
 /// escaping, so neither a backtick nor a `"` inside it can be trusted to end
 /// it, but the field names listed after it hold neither.
 fn field_span(message: &str) -> Option<Range<usize>> {
-    let mut in_string = false;
-    let (tick, _) = message.char_indices().find(|&(_, c)| {
-        if c == '"' {
-            in_string = !in_string;
-        }
-        c == '`' && !in_string
-    })?;
+    let strings = string_spans(message);
+    let (tick, _) = message
+        .match_indices('`')
+        .find(|(i, _)| !strings.iter().any(|string| string.contains(i)))?;
     let start = tick + 1;
     let rest = &message[start..];
     let end = ["`, expected", "`, there are no fields"]
@@ -278,16 +275,42 @@ fn field_span(message: &str) -> Option<Range<usize>> {
 /// `invalid type: string "…", expected a sequence`, with `"…"`.
 fn hide_strings(message: &str) -> String {
     let mut hidden = String::new();
-    let mut parts = message.split('"');
-    hidden.push_str(parts.next().unwrap_or_default());
-    // Every other part is inside quotes; an unclosed quote hides the rest.
-    while let Some(_quoted) = parts.next() {
+    let mut shown_from = 0;
+    for string in string_spans(message) {
+        hidden.push_str(&message[shown_from..string.start]);
         hidden.push_str("\"…\"");
-        if let Some(outside) = parts.next() {
-            hidden.push_str(outside);
-        }
+        shown_from = string.end;
     }
+    hidden.push_str(&message[shown_from..]);
     hidden
+}
+
+/// Where each double-quoted string in a message sits, quotes included.
+/// serde writes a string value with Rust's escapes, so a string ends at the
+/// first `"` that no `\` escapes; an unclosed one runs to the end.
+fn string_spans(message: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut chars = message.char_indices();
+    while let Some((start, c)) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut end = message.len();
+        let mut escaped = false;
+        for (i, c) in chars.by_ref() {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => {
+                    end = i + 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        spans.push(start..end);
+    }
+    spans
 }
 
 fn parse_interval(text: &str) -> anyhow::Result<Duration> {
@@ -325,12 +348,12 @@ fn hide_credentials(text: &str) -> String {
 
 /// The length of the URL scheme and `://` the text starts with, or 0.
 fn scheme_len(text: &str) -> usize {
-    let name = text
+    let name_end = text
         .find(|c: char| !(c.is_ascii_alphanumeric() || "+-.".contains(c)))
         .unwrap_or(text.len());
     let starts_with_letter = text.starts_with(|c: char| c.is_ascii_alphabetic());
-    if starts_with_letter && text[name..].starts_with("://") {
-        name + "://".len()
+    if starts_with_letter && text[name_end..].starts_with("://") {
+        name_end + "://".len()
     } else {
         0
     }
