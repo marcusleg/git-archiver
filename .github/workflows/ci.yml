@@ -25,3 +25,17 @@ jobs:
       - run: cargo test --locked
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: git-archiver:smoke-test
+          cache-from: type=gha,scope=ci-image
+          cache-to: type=gha,mode=max,scope=ci-image
+      - run: scripts/smoke-test-image.sh git-archiver:smoke-test
