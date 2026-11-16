@@ -101,9 +101,8 @@ Handle every message that has arrived, then sweep:
 - **`ISSUE-DONE #<n> <url>`:** confirm the PR with `gh pr view <url> --json state,mergeable`, then watch its checks:
   `hc run --bg --name ci-<n> -- gh pr checks <url> --watch --fail-fast`
 - **`ci-<n>` exited:** read its exit code with `hc get ci-<n>` (0 passed, 1 failed, 8 pending) and its output with `hc read ci-<n>`, then run `hc rm ci-<n>`.
-  - **Passed:** `gh pr merge <url> --rebase --delete-branch`. If the merge is refused, send the reason to the worker if it can fix it (a conflict); otherwise tell the user. Never force a merge.
+  - **Passed:** `gh pr merge <url> --rebase --delete-branch`. If the merge is refused, send the reason to the worker if it can fix it (a conflict, or a branch behind `main`); otherwise tell the user. Never force a merge, and never pass `--admin`: it bypasses the ruleset that keeps `main` green.
   - **Failed:** send the worker the failing check names and the output of `gh run view <run-id> --log-failed`. After two failed rounds on the same PR, hand the PR to the user instead.
-  - **No checks reported:** merge, and list that under Decisions.
 - **`ISSUE-FAILED`:** tell the user the reason. Leave the issue assigned and its worker open.
 - **Sweep, on every wake:** run `herdr-app ls`.
   - For each worker whose status is `blocked`, tell the user which space needs them. Never answer for the user and never `hc send --force`.
@@ -127,4 +126,4 @@ The loop ends when no issue is left that is either in the frontier or running. I
 - PRs still open or failing, with links;
 - stuck or blocked issues, and why;
 - any spec whose issues are now all closed, so the user can close it;
-- **Decisions:** every gap you settled yourself (merging without checks, branch names, anything else).
+- **Decisions:** every gap you settled yourself (branch names, anything else).
