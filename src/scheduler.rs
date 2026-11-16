@@ -58,15 +58,24 @@ impl Scheduler {
     }
 
     /// Re-reads the repo list. An unreadable or invalid config keeps the
-    /// last good list.
+    /// last good list. Queued repos no longer tracked leave the queue.
     fn reload_tracked(&mut self) {
-        match config::load(&self.config_path) {
-            Ok(config) => {
-                self.overview.lock().unwrap().tracked = tracked(&config.repos);
-                self.config_error = None;
-            }
-            Err(e) => {
-                let error = format!("{e:#}");
+        let overview = &self.overview;
+        let error = config::load_locked(&self.config_path, |config| {
+            let config = config.map_err(|e| format!("{e:#}"))?;
+            let mut overview = overview.lock().unwrap();
+            overview.tracked = tracked(&config.repos);
+            let Overview {
+                tracked,
+                fetch_first,
+                ..
+            } = &mut *overview;
+            fetch_first.retain(|id| tracked.iter().any(|t| t.id == *id));
+            Ok(())
+        });
+        match error {
+            Ok(()) => self.config_error = None,
+            Err(error) => {
                 if self.config_error.as_ref() != Some(&error) {
                     tracing::error!(error, "keeping the last good config");
                     self.config_error = Some(error);
@@ -81,19 +90,17 @@ impl Scheduler {
         // One lock for reading the queue and recording the result, so a repo
         // jumping the queue meanwhile isn't hidden by a stale due time.
         let mut overview = self.overview.lock().unwrap();
-        let next = Self::next_in(&overview, self.interval, self.started, now);
+        let next = Self::next_fetch_in(&overview, self.interval, self.started, now);
         overview.next_fetch = next.as_ref().map(|(due, _)| *due);
         next
     }
 
-    fn next_in(
+    fn next_fetch_in(
         overview: &Overview,
         interval: Duration,
         started: SystemTime,
         now: SystemTime,
     ) -> Option<(SystemTime, Tracked)> {
-        // Only tracked repos jump the queue; the others wait in it until
-        // they're tracked again.
         let first = overview
             .fetch_first
             .iter()

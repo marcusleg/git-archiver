@@ -127,9 +127,9 @@ fn validate_repo_url(repo: String) -> anyhow::Result<String> {
     Ok(repo)
 }
 
-/// Why the config would reject this repo URL, as the rest of a sentence
-/// that starts with the URL.
-pub fn check_repo_url(repo: &str) -> Result<(), &'static str> {
+/// The repo's identity if the config would accept this URL; otherwise why
+/// not, as the rest of a sentence that starts with the URL.
+pub fn check_repo_url(repo: &str) -> Result<RepoId, &'static str> {
     let url = url::Url::parse(repo).map_err(|_| "is not a valid URL")?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err("must be an http:// or https:// URL");
@@ -143,8 +143,7 @@ pub fn check_repo_url(repo: &str) -> Result<(), &'static str> {
     if url.path().trim_matches('/').is_empty() {
         return Err("has no repository path");
     }
-    RepoId::from_url(repo).map_err(|_| "has an unsupported repository path")?;
-    Ok(())
+    RepoId::from_url(repo).map_err(|_| "has an unsupported repository path")
 }
 
 /// Why a repo couldn't be added to the config.
@@ -153,42 +152,45 @@ pub enum AddError {
     /// The file doesn't hold a valid config right now. Its own error is for
     /// the log only: it may quote a token.
     Invalid(anyhow::Error),
-    /// A repo with the same identity is tracked under this URL.
+    /// A repo with the same archive is tracked under this URL.
     AlreadyTracked(String),
     /// Reading or writing the file failed.
     Io(anyhow::Error),
 }
 
-/// Serializes changes to the config, so concurrent adds can't lose one
-/// another.
-static WRITE: Mutex<()> = Mutex::new(());
+/// Held while the config is read for its repo list or changed, so an add and
+/// a reload never interleave.
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
-/// Checks that `url` could be added now: the config is valid and doesn't
-/// track the same repo yet. `url` must pass [`check_repo_url`].
-pub fn check_add(path: &Path, url: &str) -> Result<(), AddError> {
-    let text = read(path)?;
-    let config = parse(&text).map_err(AddError::Invalid)?;
-    match tracked_as(&config.repos, url) {
-        Some(existing) => Err(AddError::AlreadyTracked(existing.to_owned())),
-        None => Ok(()),
-    }
+/// Loads the config and hands the result to `f`, with no add in between.
+pub fn load_locked<T>(path: &Path, f: impl FnOnce(anyhow::Result<Config>) -> T) -> T {
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    f(load(path))
 }
 
-/// Appends `url` to `repos` and returns the new repo list. The file is edited
-/// in place, so the operator's comments and formatting survive, and replaced
-/// in one step, so a crash never leaves a partial config. `url` must pass
-/// [`check_repo_url`].
-pub fn add_repo(path: &Path, url: &str) -> Result<Vec<String>, AddError> {
-    let _write = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+/// Checks that the repo could be added now: the config is valid and doesn't
+/// track a repo with the same archive yet.
+pub fn check_add(path: &Path, id: &RepoId) -> Result<(), AddError> {
+    read_for_add(path, id).map(drop)
+}
+
+/// Appends `url`, whose identity is `id`, to `repos`, then calls `on_added`
+/// with the new repo list before any other add or reload can read the file.
+/// The file is edited in place, so the operator's comments and formatting
+/// survive, and replaced in one step, so a crash never leaves a partial
+/// config.
+pub fn add_repo(
+    path: &Path,
+    url: &str,
+    id: &RepoId,
+    on_added: impl FnOnce(&[String]),
+) -> Result<(), AddError> {
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // A symlinked config is replaced at its target, keeping the link.
     let path = std::fs::canonicalize(path)
         .with_context(|| format!("couldn't read config {}", path.display()))
         .map_err(AddError::Io)?;
-    let text = read(&path)?;
-    let config = parse(&text).map_err(AddError::Invalid)?;
-    if let Some(existing) = tracked_as(&config.repos, url) {
-        return Err(AddError::AlreadyTracked(existing.to_owned()));
-    }
+    let (text, config) = read_for_add(&path, id)?;
 
     let edited = append_repo(&text, url).map_err(AddError::Invalid)?;
     let repos = parse(&edited)
@@ -203,74 +205,120 @@ pub fn add_repo(path: &Path, url: &str) -> Result<Vec<String>, AddError> {
         )));
     }
     write_atomically(&path, &edited).map_err(AddError::Io)?;
-    Ok(repos)
+    on_added(&repos);
+    Ok(())
 }
 
-fn read(path: &Path) -> Result<String, AddError> {
-    std::fs::read_to_string(path)
+/// The config's text and contents, if a repo with identity `id` could be
+/// added to it.
+fn read_for_add(path: &Path, id: &RepoId) -> Result<(String, Config), AddError> {
+    let text = std::fs::read_to_string(path)
         .with_context(|| format!("couldn't read config {}", path.display()))
-        .map_err(AddError::Io)
-}
-
-/// The tracked URL with the same repo identity as `url`, if any.
-fn tracked_as<'a>(repos: &'a [String], url: &str) -> Option<&'a str> {
-    let id = RepoId::from_url(url).ok()?;
-    repos
-        .iter()
-        .find(|repo| RepoId::from_url(repo).is_ok_and(|other| other == id))
-        .map(String::as_str)
+        .map_err(AddError::Io)?;
+    let config = parse(&text).map_err(AddError::Invalid)?;
+    // URLs differing only in scheme share an archive, so they count as the
+    // same repo here.
+    let tracked = config.repos.iter().find(|repo| {
+        RepoId::from_url(repo).is_ok_and(|other| other.archive_path() == id.archive_path())
+    });
+    match tracked {
+        Some(existing) => Err(AddError::AlreadyTracked(existing.clone())),
+        None => Ok((text, config)),
+    }
 }
 
 /// The config text with `url` appended to `repos`, laid out like the entries
-/// around it.
+/// around it and keeping the file's line endings.
 fn append_repo(text: &str, url: &str) -> anyhow::Result<String> {
+    let crlf = text.contains("\r\n");
+    let text = text.replace("\r\n", "\n");
     let mut doc: DocumentMut = text.parse()?;
-    match doc.get_mut("repos") {
+    let has_settings = doc.iter().any(|(_, item)| item.is_value());
+    let edited = match doc.get_mut("repos") {
         Some(repos) => {
             let repos = repos.as_array_mut().context("`repos` is not an array")?;
             append_formatted(repos, url);
+            doc.to_string()
         }
-        None => {
+        None if has_settings => {
             doc.insert("repos", toml_edit::value(Array::from_iter([url])));
+            doc.to_string()
+        }
+        None => insert_first_setting(&text, &format!("repos = {}\n", Array::from_iter([url]))),
+    };
+    Ok(if crlf {
+        edited.replace('\n', "\r\n")
+    } else {
+        edited
+    })
+}
+
+/// Puts `line` into a config with no top-level settings: after the comments
+/// that open the file, up to their last blank line, since comments right
+/// above a table describe that table.
+fn insert_first_setting(text: &str, line: &str) -> String {
+    let mut opening = 0;
+    let mut after_blank = 0;
+    for l in text.split_inclusive('\n') {
+        let trimmed = l.trim();
+        if !(trimmed.is_empty() || trimmed.starts_with('#')) {
+            break;
+        }
+        opening += l.len();
+        if trimmed.is_empty() {
+            after_blank = opening;
         }
     }
-    Ok(doc.to_string())
+    if opening == text.len() {
+        // Only comments: the setting goes at the end.
+        let newline = if text.is_empty() || text.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        return format!("{text}{newline}{line}");
+    }
+    let (head, rest) = text.split_at(after_blank);
+    format!("{head}{line}\n{rest}")
 }
 
 /// Appends `url` after the array's last entry and whatever comments follow
 /// it. A multi-line array gets the new entry on its own line, indented like
 /// the last entry and followed by a comma.
 fn append_formatted(array: &mut Array, url: &str) {
-    let raw = |raw: Option<&RawString>| raw.and_then(RawString::as_str).unwrap_or("").to_owned();
-    let trailing = raw(Some(array.trailing()));
+    let text_of =
+        |raw: Option<&RawString>| raw.and_then(RawString::as_str).unwrap_or("").to_owned();
     let trailing_comma = array.trailing_comma();
     let mut indent = "  ".to_owned();
-    let mut first = true;
+    let is_empty = array.is_empty();
     // Everything between the last entry (or its comma) and the closing
     // bracket.
-    let mut after = trailing;
+    let mut before_close = text_of(Some(array.trailing()));
     if let Some(last) = array.iter_mut().last() {
-        first = false;
         let decor = last.decor_mut();
-        if let Some((_, last_line)) = raw(decor.prefix()).rsplit_once('\n') {
+        if let Some((_, last_line)) = text_of(decor.prefix()).rsplit_once('\n') {
             indent = last_line.to_owned();
         }
         if !trailing_comma {
-            after = raw(decor.suffix()) + &after;
+            before_close = text_of(decor.suffix()) + &before_close;
             decor.set_suffix("");
         }
     }
 
     let mut value = Value::from(url);
-    match after.rsplit_once('\n') {
-        Some((head, closing_indent)) => {
-            value.decor_mut().set_prefix(format!("{head}\n{indent}"));
+    match before_close.rsplit_once('\n') {
+        Some((comments, closing_indent)) => {
+            value
+                .decor_mut()
+                .set_prefix(format!("{comments}\n{indent}"));
             array.set_trailing(format!("\n{closing_indent}"));
             array.set_trailing_comma(true);
         }
         None => {
-            value.decor_mut().set_prefix(if first { "" } else { " " });
-            array.set_trailing(after);
+            value
+                .decor_mut()
+                .set_prefix(if is_empty { "" } else { " " });
+            array.set_trailing(before_close);
         }
     }
     value.decor_mut().set_suffix("");

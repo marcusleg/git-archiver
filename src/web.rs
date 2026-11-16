@@ -18,9 +18,8 @@ use crate::archive::{self, Archives, Inspection};
 use crate::clock::Clock;
 use crate::config::{self, AddError};
 use crate::git_http;
-use crate::identity::RepoId;
 use crate::metrics;
-use crate::overview::{self, SharedOverview, Tracked};
+use crate::overview::{SharedOverview, Tracked};
 use crate::state::{RepoState, Status};
 
 pub struct AppState {
@@ -96,7 +95,7 @@ fn asset(content_type: &'static str, body: &'static [u8]) -> Response {
 }
 
 #[derive(Deserialize)]
-struct AddRepo {
+struct AddRepoRequest {
     #[serde(default)]
     url: String,
 }
@@ -112,7 +111,7 @@ async fn add_repo(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
     uri: Uri,
-    Form(form): Form<AddRepo>,
+    Form(form): Form<AddRepoRequest>,
 ) -> Response {
     let url = form.url.trim();
     match try_add(&app, url).await {
@@ -137,9 +136,8 @@ async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
     if url.is_empty() {
         return Err("Enter the URL of the repo to add.".to_owned());
     }
-    config::check_repo_url(url).map_err(|problem| format!("“{url}” {problem}."))?;
-    let id = RepoId::from_url(url).map_err(|e| format!("{e:#}"))?;
-    config::check_add(&app.config_path, url).map_err(|e| add_error(app, url, e))?;
+    let id = config::check_repo_url(url).map_err(|problem| format!("“{url}” {problem}."))?;
+    config::check_add(&app.config_path, &id).map_err(|e| add_error(app, url, e))?;
 
     let deadline = app.clock.now() + PROBE_TIMEOUT;
     let probe = tokio::select! {
@@ -150,18 +148,20 @@ async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
     };
     probe.map_err(|message| format!("Couldn’t reach “{url}”: {message}"))?;
 
-    let repos = config::add_repo(&app.config_path, url).map_err(|e| add_error(app, url, e))?;
-    tracing::info!(repo = %id, "added");
-    {
+    config::add_repo(&app.config_path, url, &id, |repos| {
         let mut overview = app.overview.lock().unwrap();
-        overview.tracked = overview::tracked(&repos);
-        overview.jump_queue(id, app.clock.now());
-    }
+        overview.add_tracked(repos, id.clone(), app.clock.now());
+    })
+    .map_err(|e| add_error(app, url, e))?;
+    tracing::info!(repo = %id, "added");
     app.wake_scheduler.notify_one();
     Ok(())
 }
 
 fn add_error(app: &AppState, url: &str, error: AddError) -> String {
+    if let AddError::Invalid(e) | AddError::Io(e) = &error {
+        tracing::error!(error = %format!("{e:#}"), "couldn't add a repo to the config");
+    }
     match error {
         AddError::AlreadyTracked(existing) if existing == url => {
             format!("“{url}” is already tracked.")
@@ -169,17 +169,16 @@ fn add_error(app: &AppState, url: &str, error: AddError) -> String {
         AddError::AlreadyTracked(existing) => {
             format!("“{url}” is already tracked as “{existing}”.")
         }
-        AddError::Invalid(e) => {
-            tracing::error!(error = %format!("{e:#}"), "couldn't add a repo to the config");
-            format!(
-                "Couldn’t add the repo: the config file is invalid. Fix {} and try again.",
-                app.config_path.display()
-            )
-        }
-        AddError::Io(e) => {
-            tracing::error!(error = %format!("{e:#}"), "couldn't add a repo to the config");
-            format!("Couldn’t add the repo: {e:#}")
-        }
+        AddError::Invalid(_) => format!(
+            "Couldn’t add the repo: the config file is invalid. Fix {} and try again.",
+            app.config_path.display()
+        ),
+        AddError::Io(e) => format!(
+            "Couldn’t add the repo: {} can’t be read or written ({}). \
+             Check that the app may write to it and try again.",
+            app.config_path.display(),
+            e.root_cause()
+        ),
     }
 }
 
