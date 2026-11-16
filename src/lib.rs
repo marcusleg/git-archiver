@@ -97,6 +97,7 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
             started: options.clock.now(),
             overview: overview.clone(),
             wake: wake_scheduler.clone(),
+            tokens: config.tokens,
             config_error: None,
         }
         .run(),

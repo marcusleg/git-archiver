@@ -33,6 +33,11 @@ struct Behaviour {
     /// Repos that fail instead of being served, by request path prefix.
     failing: Mutex<HashMap<String, Failure>>,
     hung_requests: AtomicUsize,
+    /// When set, every request must carry this token as its HTTP basic auth
+    /// password, the way a git host checks an access token.
+    required_token: Mutex<Option<String>>,
+    /// Every `Authorization` header received, in order.
+    authorizations: Mutex<Vec<String>>,
 }
 
 /// A way the forge can refuse or fail to serve a repo.
@@ -72,6 +77,8 @@ impl FakeForge {
             served: dir.path().join("served"),
             failing: Mutex::default(),
             hung_requests: AtomicUsize::new(0),
+            required_token: Mutex::default(),
+            authorizations: Mutex::default(),
         });
         let router = axum::Router::new()
             .fallback(http_backend)
@@ -127,6 +134,17 @@ impl FakeForge {
             assert!(Instant::now() < deadline, "no request hung");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// Answers every request without this token as the basic auth password
+    /// with 401 Unauthorized.
+    pub fn require_token(&self, token: &str) {
+        *self.behaviour.required_token.lock().unwrap() = Some(token.to_owned());
+    }
+
+    /// Every `Authorization` header the forge has received.
+    pub fn authorizations(&self) -> Vec<String> {
+        self.behaviour.authorizations.lock().unwrap().clone()
     }
 
     /// The host part of every repo URL, as it appears in archive paths.
@@ -262,6 +280,17 @@ impl Upstream {
 /// Answers one request by running `git http-backend` as a CGI script.
 async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
+    let authorization = parts
+        .headers
+        .get("authorization")
+        .map(|v| v.to_str().unwrap_or_default().to_owned());
+    if let Some(authorization) = &authorization {
+        behaviour
+            .authorizations
+            .lock()
+            .unwrap()
+            .push(authorization.clone());
+    }
     let failure = {
         let failing = behaviour.failing.lock().unwrap();
         failing
@@ -271,6 +300,16 @@ async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request)
     };
     if let Some(failure) = failure {
         return fail(&behaviour, failure).await;
+    }
+    let required = behaviour.required_token.lock().unwrap().clone();
+    if let Some(required) = required
+        && basic_auth_password(authorization.as_deref()) != Some(required)
+    {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("www-authenticate", "Basic realm=\"fake forge\"")
+            .body(Body::empty())
+            .unwrap();
     }
     let body = to_bytes(body, usize::MAX).await.unwrap();
 
@@ -338,6 +377,17 @@ async fn fail(behaviour: &Behaviour, failure: Failure) -> Response {
         );
     }
     response
+}
+
+/// The password of a `Basic` authorization header.
+fn basic_auth_password(authorization: Option<&str>) -> Option<String> {
+    use base64::Engine;
+    let encoded = authorization?.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let (_user, password) = std::str::from_utf8(&decoded).ok()?.split_once(':')?;
+    Some(password.to_owned())
 }
 
 fn cgi_header_var(name: &str) -> String {

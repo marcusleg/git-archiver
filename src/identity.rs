@@ -12,6 +12,8 @@ pub struct RepoId {
     id: String,
     /// `<host>[:<port>]/<path>`
     host_and_path: String,
+    /// `<host>[:<port>]`
+    host: String,
 }
 
 impl RepoId {
@@ -45,6 +47,7 @@ impl RepoId {
         Ok(Self {
             id: format!("{}://{host}/{path}", url.scheme().to_ascii_lowercase()),
             host_and_path: format!("{host}/{path}"),
+            host,
         })
     }
 
@@ -56,6 +59,11 @@ impl RepoId {
     /// endpoint URL.
     pub fn host_and_path(&self) -> &str {
         &self.host_and_path
+    }
+
+    /// The lowercased host, with the port if the URL names one.
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
     /// Where the archive lives, relative to `repos/`.

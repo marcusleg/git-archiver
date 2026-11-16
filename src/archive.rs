@@ -24,6 +24,7 @@ use anyhow::{Context, bail};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::config::Token;
 use crate::identity::RepoId;
 use crate::state::Status;
 
@@ -151,14 +152,16 @@ impl Archives {
     /// upstream. Before an archived ref moves or goes in a way that would
     /// lose history (a rewrite), its old tip is kept as a preserved ref under
     /// `refs/preserved/<now>/`. Returns the preserved refs it created. A repo
-    /// upstream refuses on its first fetch gets no archive.
+    /// upstream refuses on its first fetch gets no archive. The token, if any, is
+    /// sent with every request to upstream.
     pub async fn fetch(
         &self,
         id: &RepoId,
         url: &str,
         now: SystemTime,
+        token: Option<&Token>,
     ) -> Result<Vec<String>, FetchError> {
-        self.try_fetch(id, url, now).await.map_err(|e| {
+        self.try_fetch(id, url, now, token).await.map_err(|e| {
             e.downcast::<FetchError>()
                 .unwrap_or_else(|e| FetchError::Failed {
                     reason: format!("{e:#}"),
@@ -171,9 +174,10 @@ impl Archives {
         id: &RepoId,
         url: &str,
         now: SystemTime,
+        token: Option<&Token>,
     ) -> anyhow::Result<Vec<String>> {
         let archive = self.path(id);
-        let default_branch = upstream_default_branch(url).await?;
+        let default_branch = upstream_default_branch(url, token).await?;
         create_if_missing(&archive).await?;
 
         clear_staging(&archive).await?;
@@ -190,7 +194,7 @@ impl Archives {
             url,
         ];
         args.extend(refspecs.iter().map(String::as_str));
-        git_upstream(&archive, &args).await?;
+        git_upstream(&archive, &args, token).await?;
 
         let staged = list_refs(&archive, &[STAGING]).await?;
         let archived = list_refs(&archive, &["refs/heads/", "refs/tags/"]).await?;
@@ -361,8 +365,12 @@ async fn create_if_missing(archive: &Path) -> anyhow::Result<()> {
 
 /// The branch upstream's `HEAD` points at, or `None` for an upstream with no
 /// commits, which doesn't advertise one.
-async fn upstream_default_branch(url: &str) -> anyhow::Result<Option<String>> {
-    let output = git_upstream(Path::new("."), &["ls-remote", "--symref", url, "HEAD"]).await?;
+async fn upstream_default_branch(
+    url: &str,
+    token: Option<&Token>,
+) -> anyhow::Result<Option<String>> {
+    let args = ["ls-remote", "--symref", url, "HEAD"];
+    let output = git_upstream(Path::new("."), &args, token).await?;
     let branch = output.lines().find_map(|line| {
         let (target, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
         (name == "HEAD").then_some(target)
@@ -433,11 +441,24 @@ async fn rev_parse(archive: &Path, rev: &str) -> anyhow::Result<Option<String>> 
 
 /// Runs a git command that talks to upstream. Its failure is a
 /// [`FetchError`], classified from git's stderr.
-async fn git_upstream(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = command(dir, args)
-        .output()
-        .await
-        .context("couldn't run git")?;
+///
+/// The token, if any, travels as an `http.extraHeader` set through git's
+/// `GIT_CONFIG_*` environment variables, so it never shows up in process
+/// arguments and is never written to the archive's config. Unlike a
+/// credential helper, it goes out with the first request, which is what lifts
+/// anonymous rate limits.
+async fn git_upstream(dir: &Path, args: &[&str], token: Option<&Token>) -> anyhow::Result<String> {
+    let mut command = command(dir, args);
+    if let Some(token) = token {
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+            .env(
+                "GIT_CONFIG_VALUE_0",
+                format!("Authorization: {}", token.basic_auth()),
+            );
+    }
+    let output = command.output().await.context("couldn't run git")?;
     if !output.status.success() {
         return Err(classify(&String::from_utf8_lossy(&output.stderr)).into());
     }
@@ -449,7 +470,16 @@ async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 async fn git_with_input(dir: &Path, args: &[&str], input: &str) -> anyhow::Result<String> {
-    let mut child = command(dir, args)
+    run(command(dir, args), dir, args, input).await
+}
+
+async fn run(
+    mut command: Command,
+    dir: &Path,
+    args: &[&str],
+    input: &str,
+) -> anyhow::Result<String> {
+    let mut child = command
         .stdin(Stdio::piped())
         .spawn()
         .context("couldn't run git")?;
@@ -480,6 +510,9 @@ pub(crate) fn command(dir: &Path, args: &[&str]) -> Command {
             command.env_remove(name);
         }
     }
+    // Git asks this program for credentials on a 401 even when terminal
+    // prompts are off.
+    command.env_remove("SSH_ASKPASS");
     command
         .arg("-C")
         .arg(dir)
