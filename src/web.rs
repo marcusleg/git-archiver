@@ -19,13 +19,12 @@ use crate::clock::Clock;
 use crate::git_http;
 use crate::identity::RepoId;
 use crate::metrics;
-use crate::overview::{SharedOverview, save_state};
+use crate::overview::SharedOverview;
 use crate::state::{RepoState, Status};
-use crate::tracking::{TrackOutcome, Tracking, UntrackOutcome};
+use crate::tracking::{ArchiveChoice, TrackOutcome, Tracking, UntrackOutcome};
 
 pub struct AppState {
     pub config_path: PathBuf,
-    pub state_path: PathBuf,
     pub clock: Arc<dyn Clock>,
     pub archives: Arc<Archives>,
     pub overview: SharedOverview,
@@ -194,14 +193,6 @@ fn config_unwritable(app: &AppState, action: &str, cause: &str) -> String {
     )
 }
 
-/// What to do with the archive of a repo being untracked.
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum ArchiveChoice {
-    Keep,
-    Delete,
-}
-
 #[derive(Deserialize)]
 struct UntrackRequest {
     /// The repo's identity.
@@ -234,42 +225,23 @@ async fn untrack_repo(
     }
 }
 
-/// Removes the repo from the config, stops any fetch of it and, if asked,
-/// deletes its archive and state. On failure, says why for the page.
+/// Untracks the repo through `Tracking`. On failure, says why for the page.
 async fn try_untrack(app: &AppState, id: &RepoId, archive: ArchiveChoice) -> Result<(), String> {
-    match app.tracking.untrack(id) {
-        UntrackOutcome::Untracked => {}
-        // Already untracked, e.g. a form sent twice. Deleting an untracked
-        // archive isn't offered.
-        UntrackOutcome::NotTracked => return Ok(()),
-        UntrackOutcome::ConfigInvalid => return Err(config_invalid(app, "untrack the repo")),
-        UntrackOutcome::ConfigUnwritable(cause) => {
-            return Err(config_unwritable(app, "untrack the repo", &cause));
-        }
-    }
-    if archive == ArchiveChoice::Keep {
-        return Ok(());
-    }
-
-    let _exclusive = app.archives.exclusive(id).await;
-    if app.tracking.is_tracked(id) {
-        // Added again while waiting: the archive is in use once more.
-        return Ok(());
-    }
-    app.archives.delete(id).await.map_err(|e| {
-        tracing::error!(repo = %id, error = %format!("{e:#}"), "couldn't delete archive");
-        format!(
-            "Untracked “{}”, but couldn’t delete its archive: {}. \
+    match app.tracking.untrack(id, archive).await {
+        // NotTracked: already untracked, e.g. a form sent twice. Deleting an
+        // untracked archive isn't offered.
+        UntrackOutcome::Untracked | UntrackOutcome::NotTracked => Ok(()),
+        UntrackOutcome::ArchiveNotDeleted(cause) => Err(format!(
+            "Untracked “{}”, but couldn’t delete its archive: {cause}. \
              Check that the app may write to {} and delete it by hand.",
             id.host_and_path(),
-            e.root_cause(),
             app.archives.path(id).display()
-        )
-    })?;
-    app.overview.lock().unwrap().forget(id);
-    save_state(&app.overview, &app.state_path);
-    tracing::info!(repo = %id, "deleted archive");
-    Ok(())
+        )),
+        UntrackOutcome::ConfigInvalid => Err(config_invalid(app, "untrack the repo")),
+        UntrackOutcome::ConfigUnwritable(cause) => {
+            Err(config_unwritable(app, "untrack the repo", &cause))
+        }
+    }
 }
 
 async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Html<String> {

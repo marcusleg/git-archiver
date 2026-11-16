@@ -7,13 +7,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Deserialize;
 use tokio::sync::Notify;
 
-use crate::archive;
+use crate::archive::{self, Archives};
 use crate::clock::Clock;
 use crate::config::{self, EditError, RepoListChange, Tokens};
 use crate::identity::RepoId;
-use crate::overview::{Overview, SharedOverview};
+use crate::overview::{Overview, SharedOverview, save_state};
 
 /// How long tracking waits for upstream to answer.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -22,6 +23,8 @@ pub struct Tracking {
     config_path: PathBuf,
     clock: Arc<dyn Clock>,
     overview: SharedOverview,
+    archives: Arc<Archives>,
+    state_path: PathBuf,
     /// Wakes the scheduler from waiting, after the tracked set changed or a
     /// repo jumped the queue. Stores a permit, so a wake while the scheduler
     /// is busy isn't lost.
@@ -48,11 +51,22 @@ pub enum TrackOutcome {
     ConfigUnwritable(String),
 }
 
+/// What to do with the archive of a repo being untracked.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveChoice {
+    Keep,
+    Delete,
+}
+
 /// How asking to untrack a repo ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum UntrackOutcome {
-    /// The repo was tracked and isn't now.
+    /// The repo was tracked and isn't now; its archive was kept or deleted
+    /// as asked, or tracked again meanwhile and left alone.
     Untracked,
+    /// The repo isn't tracked now, but its archive couldn't be deleted; why.
+    ArchiveNotDeleted(String),
     /// The repo wasn't tracked, e.g. a form sent twice.
     NotTracked,
     ConfigInvalid,
@@ -60,11 +74,19 @@ pub enum UntrackOutcome {
 }
 
 impl Tracking {
-    pub fn new(config_path: PathBuf, clock: Arc<dyn Clock>, overview: SharedOverview) -> Self {
+    pub fn new(
+        config_path: PathBuf,
+        state_path: PathBuf,
+        clock: Arc<dyn Clock>,
+        overview: SharedOverview,
+        archives: Arc<Archives>,
+    ) -> Self {
         Self {
             config_path,
+            state_path,
             clock,
             overview,
+            archives,
             wake: Notify::new(),
             untracked: Notify::new(),
         }
@@ -125,8 +147,36 @@ impl Tracking {
         }
     }
 
-    /// Removes the repo from the config and stops any fetch of it.
-    pub fn untrack(&self, id: &RepoId) -> UntrackOutcome {
+    /// Removes the repo from the config, stops any fetch of it and, if
+    /// asked, deletes its archive and state.
+    pub async fn untrack(&self, id: &RepoId, archive: ArchiveChoice) -> UntrackOutcome {
+        match self.untrack_in_config(id) {
+            UntrackOutcome::Untracked if archive == ArchiveChoice::Delete => {
+                self.delete_archive(id).await
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// Waits for any fetch of the archive to stop, then deletes it, unless
+    /// the repo was tracked again meanwhile.
+    async fn delete_archive(&self, id: &RepoId) -> UntrackOutcome {
+        let _exclusive = self.archives.exclusive(id).await;
+        if self.is_tracked(id) {
+            // Added again while waiting: the archive is in use once more.
+            return UntrackOutcome::Untracked;
+        }
+        if let Err(e) = self.archives.delete(id).await {
+            tracing::error!(repo = %id, error = %format!("{e:#}"), "couldn't delete archive");
+            return UntrackOutcome::ArchiveNotDeleted(e.root_cause().to_string());
+        }
+        self.overview.lock().unwrap().forget(id);
+        save_state(&self.overview, &self.state_path);
+        tracing::info!(repo = %id, "deleted archive");
+        UntrackOutcome::Untracked
+    }
+
+    fn untrack_in_config(&self, id: &RepoId) -> UntrackOutcome {
         // A repo removed from the file by hand still shows as tracked until
         // the scheduler re-reads it; the person saw it tracked, so it counts.
         let shown_tracked = self.is_tracked(id);
