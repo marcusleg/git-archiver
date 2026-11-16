@@ -4,7 +4,7 @@
 mod common;
 
 use common::forge::FakeForge;
-use common::git::{commit_of, git, git_async, refs, try_git};
+use common::git::{commit_of, git, git_async, preserved_refs, refs, try_git};
 use common::{HOUR, TestApp};
 use scraper::{Html, Selector};
 use tempfile::TempDir;
@@ -231,10 +231,7 @@ async fn a_card_with_preserved_refs_shows_a_mirror_clone_line_that_brings_them_a
     rewritten.force_push_new_history("rewritten");
     rewritten.move_tag("v1");
     interval().await;
-    let preserved: Vec<(String, String)> = refs(&app.archive(&format!("{}/foo/bar", forge.host())))
-        .into_iter()
-        .filter(|(name, _)| name.starts_with("refs/preserved/"))
-        .collect();
+    let preserved = preserved_refs(&app.archive(&format!("{}/foo/bar", forge.host())));
     assert_eq!(preserved.len(), 2, "{preserved:?}");
 
     let html = Html::parse_document(&app.get("/").await.text());
@@ -256,23 +253,22 @@ async fn a_card_with_preserved_refs_shows_a_mirror_clone_line_that_brings_them_a
         "the plain clone lines are unchanged"
     );
     assert_eq!(
-        card_lines(".preserved code.mirror"),
+        card_lines(".preserved code.mirror-clone"),
         [vec![format!("git clone --mirror {bar}")], vec![]],
         "only the card with preserved refs offers a mirror clone"
     );
-    let mirror = &card_lines(".preserved code.mirror")[0][0];
+    let mirror_clone = &card_lines(".preserved code.mirror-clone")[0][0];
     let button = html
         .select(&Selector::parse(".preserved .clone-line button[data-copy]").unwrap())
         .next()
         .expect("the mirror line has a copy button");
-    assert_eq!(button.value().attr("data-copy"), Some(mirror.as_str()));
+    assert_eq!(
+        button.value().attr("data-copy"),
+        Some(mirror_clone.as_str())
+    );
 
     let out = TempDir::new().unwrap();
-    let args: Vec<&str> = mirror.split_whitespace().skip(1).collect();
+    let args: Vec<&str> = mirror_clone.split_whitespace().skip(1).collect();
     git_async(out.path(), &args).await;
-    let cloned: Vec<(String, String)> = refs(&out.path().join("bar.git"))
-        .into_iter()
-        .filter(|(name, _)| name.starts_with("refs/preserved/"))
-        .collect();
-    assert_eq!(cloned, preserved);
+    assert_eq!(preserved_refs(&out.path().join("bar.git")), preserved);
 }

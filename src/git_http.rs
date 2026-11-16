@@ -38,17 +38,17 @@ const SERVICES: &[&str] = &["git-upload-pack", "git-receive-pack"];
 /// The command that clones a repo's archive from the endpoint, for a server
 /// reached at `base` (`http://<host>[:<port>]`).
 pub fn clone_command(base: &str, id: &RepoId) -> String {
-    format!("git clone {}", url(base, id))
+    format!("git clone {}", endpoint_url(base, id))
 }
 
 /// Like [`clone_command`], but a mirror clone, which also brings along the
 /// preserved refs a plain clone leaves out.
 pub fn mirror_clone_command(base: &str, id: &RepoId) -> String {
-    format!("git clone --mirror {}", url(base, id))
+    format!("git clone --mirror {}", endpoint_url(base, id))
 }
 
 /// A repo's archive's URL on the endpoint.
-fn url(base: &str, id: &RepoId) -> String {
+fn endpoint_url(base: &str, id: &RepoId) -> String {
     format!("{base}{PREFIX}{}.git", id.host_and_path())
 }
 
