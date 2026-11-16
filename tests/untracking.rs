@@ -345,6 +345,32 @@ async fn the_config_warning_never_quotes_the_file() {
 }
 
 #[tokio::test]
+async fn the_config_warning_names_a_hosts_key_with_credentials_without_showing_them() {
+    let logs = common::logs::capture();
+    let good = "https://example.com/good/repo";
+    let app = TestApp::tracking(&[good]).await;
+
+    app.write_config(&format!(
+        "{}\n[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"x\"\n",
+        config_tracking(&[good, "https://example.com/new/repo"]),
+    ));
+    app.advance_and_settle(MINUTE).await;
+
+    let banner = config_banner(&app).await.expect("a warning banner");
+    assert!(banner.contains("`hosts` key"), "which setting: {banner}");
+    assert!(banner.contains("github.com"), "which key: {banner}");
+    assert!(banner.contains("must be a host"), "why: {banner}");
+    let page = app.get("/").await.text();
+    assert!(!page.contains("secretpw"), "{page}");
+    assert!(!page.contains("user:"), "{page}");
+    let logged = logs.lines().join("\n");
+    assert!(logged.contains("must be a host"), "{logged}");
+    assert!(!logged.contains("secretpw"), "{logged}");
+    assert!(!logged.contains("user:"), "{logged}");
+    assert_eq!(tracked(&app).await, [good], "keeps the last good config");
+}
+
+#[tokio::test]
 async fn the_config_warning_names_a_repo_url_with_credentials_without_showing_them() {
     let logs = common::logs::capture();
     let good = "https://example.com/good/repo";
