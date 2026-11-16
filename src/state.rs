@@ -34,7 +34,7 @@ pub struct RepoState {
     /// Git's message for the last failed fetch, while the repo isn't
     /// Available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub reason: Option<String>,
     /// The HTTP status upstream refused the repo with, while it's
     /// Unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,40 +51,40 @@ impl RepoState {
         self.size_bytes = size_bytes;
     }
 
-    /// Records a fetch's result. Returns the previous status if the status
-    /// changed; the status-since time is kept while it doesn't.
+    /// Records a fetch's result. Returns the status change, if any; the
+    /// status-since time is kept while the status doesn't change.
     pub fn record_result(
         &mut self,
         at: SystemTime,
         result: &Result<(), FetchError>,
-    ) -> Option<Option<Status>> {
-        let status = match result {
-            Ok(()) => {
-                self.last_success = Some(at);
-                self.error = None;
-                self.http_status = None;
-                Status::Available
-            }
-            Err(e) => {
-                self.error = Some(e.reason().to_owned());
-                match e {
-                    FetchError::Unavailable { http_status, .. } => {
-                        self.http_status = Some(*http_status);
-                        Status::Unavailable
-                    }
-                    FetchError::Failed { .. } => {
-                        self.http_status = None;
-                        Status::FetchFailed
-                    }
-                }
-            }
+    ) -> Option<StatusChange> {
+        let to = match result {
+            Ok(()) => Status::Available,
+            Err(e) => e.status(),
         };
-        if self.status == Some(status) {
+        if to == Status::Available {
+            self.last_success = Some(at);
+        }
+        self.reason = result.as_ref().err().map(|e| e.reason().to_owned());
+        self.http_status = match result {
+            Err(FetchError::Unavailable { http_status, .. }) => Some(*http_status),
+            _ => None,
+        };
+        if self.status == Some(to) {
             return None;
         }
         self.status_since = Some(at);
-        Some(self.status.replace(status))
+        let from = self.status.replace(to);
+        Some(StatusChange { from, to })
     }
+}
+
+/// A repo's status changing after a fetch.
+#[derive(Debug, Clone, Copy)]
+pub struct StatusChange {
+    /// `None` for a repo's first fetch.
+    pub from: Option<Status>,
+    pub to: Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

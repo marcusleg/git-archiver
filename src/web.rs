@@ -215,8 +215,8 @@ fn repo_card(
 /// Git's message for the last failed fetch, as git wrote it.
 fn reason(state: &RepoState) -> Markup {
     html! {
-        @if let Some(error) = &state.error {
-            pre .reason { (error) }
+        @if let Some(reason) = &state.reason {
+            pre .reason { (reason) }
         }
     }
 }
@@ -230,20 +230,21 @@ fn date(at: SystemTime) -> Markup {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][month.parse::<usize>().expect("RFC 3339 has a month") - 1];
     let day = day.trim_start_matches('0');
-    html! {
-        time datetime=(exact) title=(exact.replace('T', " ").replace('Z', " UTC")) {
-            (day) " " (month) " " (year)
-        }
-    }
+    time_element(at, &format!("{day} {month} {year}"))
 }
 
 /// A `<time>` showing how long ago `then` was, with the exact UTC time on
 /// hover.
 fn time(then: SystemTime, now: SystemTime) -> Markup {
-    let exact = humantime::format_rfc3339_seconds(then).to_string();
+    time_element(then, &time_ago(then, now))
+}
+
+/// A `<time>` for `at` showing `text`, with the exact UTC time on hover.
+fn time_element(at: SystemTime, text: &str) -> Markup {
+    let exact = humantime::format_rfc3339_seconds(at).to_string();
     html! {
         time datetime=(exact) title=(exact.replace('T', " ").replace('Z', " UTC")) {
-            (time_ago(then, now))
+            (text)
         }
     }
 }

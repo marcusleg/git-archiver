@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use crate::identity::RepoId;
-use crate::state::{RepoState, State};
+use crate::state::{RepoState, State, Status};
 
 pub type SharedOverview = Arc<Mutex<Overview>>;
 
@@ -23,6 +23,17 @@ pub struct Overview {
 pub struct FetchErrors {
     pub unavailable: u64,
     pub fetch_failed: u64,
+}
+
+impl FetchErrors {
+    /// Counts a failed fetch by the status it leads to.
+    pub fn count(&mut self, status: Status) {
+        match status {
+            Status::Available => {}
+            Status::Unavailable => self.unavailable += 1,
+            Status::FetchFailed => self.fetch_failed += 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

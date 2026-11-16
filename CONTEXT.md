@@ -53,4 +53,4 @@ Upstream refused the repo with a 4xx response (e.g. DMCA takedown, deletion). Th
 _Avoid_: dead, taken down (one cause of unavailability, not the state)
 
 **Fetch failed**:
-A transient failure (5xx, network error, timeout) that says nothing about the repo's fate. It is retried at the repo's next turn and never touches the archive.
+A transient failure (5xx, network error, timeout, or a 408 or 429 that only asks to come back later) that says nothing about the repo's fate. It is retried at the repo's next turn and never touches the archive.
