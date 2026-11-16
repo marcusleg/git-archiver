@@ -6,14 +6,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::Notify;
-
 use crate::archive::{Archives, FetchError};
 use crate::clock::Clock;
-use crate::config::{self, Tokens};
-use crate::identity::RepoId;
+use crate::config::Tokens;
 use crate::overview::{Overview, SharedOverview, Tracked, save_state};
 use crate::state::Status;
+use crate::tracking::Tracking;
 
 /// Every fetch is stopped after this long.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -25,18 +23,14 @@ const CONFIG_RECHECK: Duration = Duration::from_secs(60);
 pub struct Scheduler {
     pub clock: Arc<dyn Clock>,
     pub archives: Arc<Archives>,
-    pub config_path: PathBuf,
     pub state_path: PathBuf,
     pub interval: Duration,
     pub started: SystemTime,
     pub overview: SharedOverview,
-    /// Wakes the scheduler from waiting, after a repo jumped the queue.
-    pub wake: Arc<Notify>,
+    pub tracking: Arc<Tracking>,
     /// From the last good config, so a changed token counts from the next
     /// fetch.
     pub tokens: Tokens,
-    /// Notified after a repo was untracked in the UI, to stop its fetch.
-    pub untrack_signal: Arc<Notify>,
     /// The last config error logged, so a broken file is logged once.
     pub config_error: Option<String>,
 }
@@ -59,7 +53,7 @@ impl Scheduler {
     async fn wait_until(&self, deadline: SystemTime) {
         tokio::select! {
             () = self.clock.sleep_until(deadline) => {}
-            () = self.wake.notified() => {}
+            () = self.tracking.changed() => {}
         }
     }
 
@@ -67,13 +61,7 @@ impl Scheduler {
     /// keeps the last good ones, and the problem shows on the list page until
     /// the file is valid again. Queued repos no longer tracked leave the queue.
     fn reload_tracked(&mut self) {
-        let overview = &self.overview;
-        let result = config::load_locked(&self.config_path, |config| {
-            let config = config.map_err(|e| format!("{e:#}"))?;
-            overview.lock().unwrap().set_tracked(&config.repos);
-            Ok(config.tokens)
-        });
-        match result {
+        match self.tracking.reload() {
             Ok(tokens) => {
                 self.tokens = tokens;
                 if self.config_error.take().is_some() {
@@ -129,21 +117,6 @@ impl Scheduler {
         Some((due, repo.clone()))
     }
 
-    /// Resolves once the repo isn't tracked any more.
-    async fn until_untracked(&self, id: &RepoId) {
-        loop {
-            // Registered before checking, so an untrack right after the
-            // check still wakes it.
-            let notified = self.untrack_signal.notified();
-            let mut notified = std::pin::pin!(notified);
-            notified.as_mut().enable();
-            if !self.overview.lock().unwrap().is_tracked(id) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
     /// Fetches the repo and records the result, unless the repo is untracked
     /// before the fetch finishes.
     async fn fetch(&self, repo: Tracked) {
@@ -156,7 +129,7 @@ impl Scheduler {
         let token = self.tokens.for_repo(&repo.id);
         let result = tokio::select! {
             biased;
-            () = self.until_untracked(&repo.id) => {
+            () = self.tracking.until_untracked(&repo.id) => {
                 tracing::info!(repo = %repo.id, "stopped fetching: no longer tracked");
                 // A first fetch stopped midway leaves an empty archive,
                 // which isn't worth keeping.
@@ -182,7 +155,6 @@ impl Scheduler {
         {
             let mut overview = self.overview.lock().unwrap();
             overview.last_fetch_duration = Some(duration);
-            overview.fetch_first.retain(|id| *id != repo.id);
             let (result, preserved) = match result {
                 Ok(preserved) => (Ok(()), preserved),
                 Err(e) => (Err(e), Vec::new()),
@@ -227,6 +199,7 @@ impl Scheduler {
                 tracing::info!(repo = %repo.id, duration_ms = duration.as_millis(), "fetched");
             }
         }
+        self.tracking.fetched(&repo.id);
         save_state(&self.overview, &self.state_path);
     }
 }

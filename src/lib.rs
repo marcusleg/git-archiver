@@ -10,6 +10,7 @@ mod metrics;
 mod overview;
 mod scheduler;
 mod state;
+mod tracking;
 mod web;
 
 use std::net::SocketAddr;
@@ -24,6 +25,7 @@ use crate::archive::Archives;
 use crate::clock::Clock;
 use crate::overview::Overview;
 use crate::scheduler::Scheduler;
+use crate::tracking::Tracking;
 
 /// How to start the app.
 pub struct Options {
@@ -86,20 +88,21 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         ..Overview::default()
     }));
     let archives = Arc::new(Archives::new(&data_dir));
-    let wake_scheduler = Arc::new(tokio::sync::Notify::new());
-    let untrack_signal = Arc::new(tokio::sync::Notify::new());
+    let tracking = Arc::new(Tracking::new(
+        config::file_path(&data_dir),
+        options.clock.clone(),
+        overview.clone(),
+    ));
     let scheduler = tokio::spawn(
         Scheduler {
             clock: options.clock.clone(),
             archives: archives.clone(),
-            config_path: config::file_path(&data_dir),
             state_path,
             interval: config.interval,
             started: options.clock.now(),
             overview: overview.clone(),
-            wake: wake_scheduler.clone(),
+            tracking: tracking.clone(),
             tokens: config.tokens,
-            untrack_signal: untrack_signal.clone(),
             config_error: None,
         }
         .run(),
@@ -111,8 +114,7 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         clock: options.clock,
         archives,
         overview,
-        wake_scheduler,
-        untrack_signal,
+        tracking,
     }));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {

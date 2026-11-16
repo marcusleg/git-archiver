@@ -65,17 +65,8 @@ impl Overview {
         self.state.repos.get(id.as_str())
     }
 
-    /// Takes the config's new repo list after the repo `id` was added, and
-    /// queues that repo to fetch as soon as no other fetch is running. The
-    /// scheduler must be woken to notice.
-    pub fn add_tracked(&mut self, repos: &[String], id: RepoId, now: SystemTime) {
-        self.tracked = tracked(repos);
-        self.fetch_first.push(id);
-        self.next_fetch = Some(now);
-    }
-
-    /// Takes the config's repo list after a repo was untracked or found
-    /// missing from it. Repos no longer tracked leave the queue.
+    /// Takes the config's repo list after a repo was tracked, untracked or
+    /// found missing from it. Repos no longer tracked leave the queue.
     pub fn set_tracked(&mut self, repos: &[String]) {
         self.tracked = tracked(repos);
         let Self {

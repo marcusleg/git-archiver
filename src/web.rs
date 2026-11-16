@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use axum::Router;
 use axum::extract::{Form, Path, Request, State};
@@ -13,16 +13,15 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 use serde::Deserialize;
-use tokio::sync::Notify;
 
-use crate::archive::{self, Archives, Inspection};
+use crate::archive::{Archives, Inspection};
 use crate::clock::Clock;
-use crate::config::{self, EditError, RepoListChange};
 use crate::git_http;
 use crate::identity::RepoId;
 use crate::metrics;
 use crate::overview::{SharedOverview, save_state};
 use crate::state::{RepoState, Status};
+use crate::tracking::{TrackOutcome, Tracking, UntrackOutcome};
 
 pub struct AppState {
     pub config_path: PathBuf,
@@ -30,13 +29,8 @@ pub struct AppState {
     pub clock: Arc<dyn Clock>,
     pub archives: Arc<Archives>,
     pub overview: SharedOverview,
-    pub wake_scheduler: Arc<Notify>,
-    /// Stops a running fetch of a repo untracked here.
-    pub untrack_signal: Arc<Notify>,
+    pub tracking: Arc<Tracking>,
 }
-
-/// How long the add form waits for upstream to answer.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 const STYLESHEET: &str = include_str!("../assets/style.css");
 
@@ -160,64 +154,44 @@ async fn add_repo(
     }
 }
 
-/// Checks the URL, makes sure upstream answers, writes it into the config
-/// and queues its clone. On failure, says why for the form.
+/// Asks Tracking to track the URL. On failure, says why for the form.
 async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
     if url.is_empty() {
         return Err("Enter the URL of the repo to add.".to_owned());
     }
-    let id = config::check_repo_url(url).map_err(|problem| format!("“{url}” {problem}."))?;
-    let token = config::check_add(&app.config_path, &id)
-        .map_err(|e| edit_error(app, Some(url), "add the repo", e))?;
-
-    let deadline = app.clock.now() + PROBE_TIMEOUT;
-    let probe = tokio::select! {
-        result = archive::probe(url, token.as_ref()) => result,
-        () = app.clock.sleep_until(deadline) => {
-            Err("it didn’t answer within a minute.".to_owned())
+    match app.tracking.track(url).await {
+        TrackOutcome::Tracked => Ok(()),
+        TrackOutcome::AlreadyTracked(existing) if existing == url => {
+            Err(format!("“{existing}” is already tracked."))
         }
-    };
-    probe.map_err(|message| format!("Couldn’t reach “{url}”: {message}"))?;
-
-    config::edit_repo_list(
-        &app.config_path,
-        RepoListChange::Add { url, id: &id },
-        |repos| {
-            let mut overview = app.overview.lock().unwrap();
-            overview.add_tracked(repos, id.clone(), app.clock.now());
-        },
-    )
-    .map_err(|e| edit_error(app, Some(url), "add the repo", e))?;
-    tracing::info!(repo = %id, "added");
-    app.wake_scheduler.notify_one();
-    Ok(())
+        TrackOutcome::AlreadyTracked(existing) => {
+            Err(format!("“{url}” is already tracked as “{existing}”."))
+        }
+        TrackOutcome::Invalid(problem) => Err(format!("“{url}” {problem}.")),
+        TrackOutcome::CouldNotBeChecked(message) => {
+            Err(format!("Couldn’t reach “{url}”: {message}"))
+        }
+        TrackOutcome::ConfigInvalid => Err(config_invalid(app, "add the repo")),
+        TrackOutcome::ConfigUnwritable(cause) => {
+            Err(config_unwritable(app, "add the repo", &cause))
+        }
+    }
 }
 
-/// Why the config's repo list couldn't be changed, for the page. `action` is
-/// what the person tried, such as "add the repo".
-fn edit_error(app: &AppState, url: Option<&str>, action: &str, error: EditError) -> String {
-    if let EditError::Invalid(e) | EditError::Io(e) = &error {
-        tracing::error!(error = %format!("{e:#}"), "couldn't {action} in the config");
-    }
-    match error {
-        EditError::AlreadyTracked(existing) if Some(existing.as_str()) == url => {
-            format!("“{existing}” is already tracked.")
-        }
-        EditError::AlreadyTracked(existing) => match url {
-            Some(url) => format!("“{url}” is already tracked as “{existing}”."),
-            None => "The repo is already tracked.".to_owned(),
-        },
-        EditError::Invalid(_) => format!(
-            "Couldn’t {action}: the config file is invalid. Fix {} and try again.",
-            app.config_path.display()
-        ),
-        EditError::Io(e) => format!(
-            "Couldn’t {action}: {} can’t be read or written ({}). \
-             Check that the app may write to it and try again.",
-            app.config_path.display(),
-            e.root_cause()
-        ),
-    }
+/// `action` is what the person tried, such as "add the repo".
+fn config_invalid(app: &AppState, action: &str) -> String {
+    format!(
+        "Couldn’t {action}: the config file is invalid. Fix {} and try again.",
+        app.config_path.display()
+    )
+}
+
+fn config_unwritable(app: &AppState, action: &str, cause: &str) -> String {
+    format!(
+        "Couldn’t {action}: {} can’t be read or written ({cause}). \
+         Check that the app may write to it and try again.",
+        app.config_path.display(),
+    )
 }
 
 /// What to do with the archive of a repo being untracked.
@@ -263,29 +237,22 @@ async fn untrack_repo(
 /// Removes the repo from the config, stops any fetch of it and, if asked,
 /// deletes its archive and state. On failure, says why for the page.
 async fn try_untrack(app: &AppState, id: &RepoId, archive: ArchiveChoice) -> Result<(), String> {
-    // A repo removed from the file by hand still shows as tracked until the
-    // scheduler re-reads it; the person saw it tracked, so it counts.
-    let shown_tracked = app.overview.lock().unwrap().is_tracked(id);
-    let removed =
-        config::edit_repo_list(&app.config_path, RepoListChange::Remove { id }, |repos| {
-            app.overview.lock().unwrap().set_tracked(repos)
-        })
-        .map_err(|e| edit_error(app, None, "untrack the repo", e))?
-            == config::Edited::Changed;
-    if !removed && !shown_tracked {
+    match app.tracking.untrack(id) {
+        UntrackOutcome::Untracked => {}
         // Already untracked, e.g. a form sent twice. Deleting an untracked
         // archive isn't offered.
-        return Ok(());
+        UntrackOutcome::NotTracked => return Ok(()),
+        UntrackOutcome::ConfigInvalid => return Err(config_invalid(app, "untrack the repo")),
+        UntrackOutcome::ConfigUnwritable(cause) => {
+            return Err(config_unwritable(app, "untrack the repo", &cause));
+        }
     }
-    tracing::info!(repo = %id, "untracked");
-    app.untrack_signal.notify_waiters();
-    app.wake_scheduler.notify_one();
     if archive == ArchiveChoice::Keep {
         return Ok(());
     }
 
     let _exclusive = app.archives.exclusive(id).await;
-    if app.overview.lock().unwrap().is_tracked(id) {
+    if app.tracking.is_tracked(id) {
         // Added again while waiting: the archive is in use once more.
         return Ok(());
     }
