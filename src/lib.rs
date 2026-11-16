@@ -90,8 +90,10 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
     let archives = Arc::new(Archives::new(&data_dir));
     let tracking = Arc::new(Tracking::new(
         config::file_path(&data_dir),
+        state_path.clone(),
         options.clock.clone(),
         overview.clone(),
+        archives.clone(),
     ));
     let scheduler = tokio::spawn(
         Scheduler {
@@ -110,7 +112,6 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
 
     let router = web::router(Arc::new(web::AppState {
         config_path: config::file_path(&data_dir),
-        state_path: state::file_path(&data_dir),
         clock: options.clock,
         archives,
         overview,
