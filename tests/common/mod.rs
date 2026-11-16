@@ -19,6 +19,7 @@ use tempfile::TempDir;
 
 use clock::ManualClock;
 
+pub const MINUTE: Duration = Duration::from_secs(60);
 pub const HOUR: Duration = Duration::from_secs(3600);
 
 pub struct TestApp {

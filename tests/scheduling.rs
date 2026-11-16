@@ -2,12 +2,8 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::forge::{Failure, FakeForge, Upstream};
-use common::{HOUR, TestApp, config_tracking};
-
-const MINUTE: Duration = Duration::from_secs(60);
+use common::{HOUR, MINUTE, TestApp, config_tracking};
 
 /// Three upstream repos with one commit each, and their repo identities.
 fn three_repos(forge: &FakeForge) -> (Vec<Upstream>, Vec<String>) {
@@ -143,7 +139,7 @@ async fn a_repo_added_to_the_config_by_hand_is_fetched_from_the_next_fetch_on_an
 }
 
 #[tokio::test]
-async fn a_repo_removed_from_the_config_by_hand_widens_the_gap_from_the_next_fetch_on() {
+async fn a_repo_untracked_by_hand_widens_the_gap_from_the_next_fetch_on() {
     let forge = FakeForge::start().await;
     let (repos, ids) = three_repos(&forge);
     let app = TestApp::tracking(&urls(&repos)).await;
