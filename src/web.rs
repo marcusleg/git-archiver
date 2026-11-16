@@ -520,10 +520,57 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
     let clone = archived.then(|| git_http::clone_command(base, id));
     let mirror_clone = archived.then(|| git_http::mirror_clone_command(base, id));
     let fetched = state.status == Some(Status::Available);
-    let unavailable_or_failed = matches!(
-        state.status,
-        Some(Status::Unavailable | Status::FetchFailed)
-    );
+    // The status line, and whether the facts add "Last success": an
+    // Available repo's status line already says when, and otherwise there
+    // is no success to show.
+    let (status_line, show_last_success) = match (state.status, state.last_success) {
+        (Some(Status::Available), Some(success)) => (
+            html! {
+                p .status.available {
+                    (icon_circle_check())
+                    span { "Fetched " (time(success, now)) }
+                }
+            },
+            false,
+        ),
+        (Some(Status::Unavailable), _) => (
+            html! {
+                p .status.unavailable {
+                    (icon_ban())
+                    span {
+                        "Unavailable"
+                        @if let Some(since) = state.status_since {
+                            " since " (date(since))
+                        }
+                        @if let Some(http_status) = state.http_status {
+                            " · HTTP " (http_status)
+                        }
+                    }
+                }
+                (reason(state))
+            },
+            true,
+        ),
+        (Some(Status::FetchFailed), _) => (
+            html! {
+                p .status.fetch-failed {
+                    (icon_refresh_cw_off())
+                    span { "Fetch failed" }
+                }
+                (reason(state))
+            },
+            true,
+        ),
+        _ => (
+            html! {
+                p .status {
+                    (icon_clock())
+                    span { "Not fetched yet" }
+                }
+            },
+            false,
+        ),
+    };
     html! {
         article .card {
             div .card-head {
@@ -532,41 +579,9 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
                     (untrack_dialog(id, n))
                 }
             }
-            @match (state.status, state.last_success) {
-                (Some(Status::Available), Some(success)) => p .status.available {
-                    (icon_circle_check())
-                    span { "Fetched " (time(success, now)) }
-                },
-                (Some(Status::Unavailable), _) => {
-                    p .status.unavailable {
-                        (icon_ban())
-                        span {
-                            "Unavailable"
-                            @if let Some(since) = state.status_since {
-                                " since " (date(since))
-                            }
-                            @if let Some(http_status) = state.http_status {
-                                " · HTTP " (http_status)
-                            }
-                        }
-                    }
-                    (reason(state))
-                },
-                (Some(Status::FetchFailed), _) => {
-                    p .status.fetch-failed {
-                        (icon_refresh_cw_off())
-                        span { "Fetch failed" }
-                    }
-                    (reason(state))
-                },
-                _ => p .status {
-                    (icon_clock())
-                    span { "Not fetched yet" }
-                },
-            }
+            (status_line)
             dl .facts {
-                // An Available card's status line already says when.
-                @if unavailable_or_failed {
+                @if show_last_success {
                     div {
                         dt { "Last success" }
                         dd { (time_or_never(state.last_success, now)) }
@@ -609,7 +624,7 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
                 (preserved_refs(preserved, mirror_clone.as_deref()))
             }
             @if let Some(clone) = clone {
-                (clone_line(&clone, "clone", "Copy clone command"))
+                (clone_line(&clone, CloneKind::Plain))
             }
         }
     }
@@ -624,9 +639,28 @@ fn reason(state: &RepoState) -> Markup {
     }
 }
 
-/// A ready-to-copy git command, in a `code` of class `class`, with a copy
-/// button labelled `label`.
-fn clone_line(command: &str, class: &str, label: &str) -> Markup {
+/// The kind of git command a clone line offers.
+#[derive(Clone, Copy)]
+enum CloneKind {
+    /// `git clone`, for the archive's default branch and tags.
+    Plain,
+    /// `git clone --mirror`, which also brings the preserved refs.
+    Mirror,
+}
+
+impl CloneKind {
+    /// The class of the line's `code`, and the label of its copy button.
+    fn class_and_label(self) -> (&'static str, &'static str) {
+        match self {
+            CloneKind::Plain => ("clone", "Copy clone command"),
+            CloneKind::Mirror => ("mirror-clone", "Copy mirror clone command"),
+        }
+    }
+}
+
+/// A ready-to-copy git `command` of the given kind, with a copy button.
+fn clone_line(command: &str, kind: CloneKind) -> Markup {
+    let (class, label) = kind.class_and_label();
     html! {
         div .clone-line {
             code class=(class) { (command) }
@@ -660,7 +694,7 @@ fn preserved_refs(preserved: &BTreeMap<String, String>, mirror_clone: Option<&st
                 }
                 @if let Some(mirror_clone) = mirror_clone {
                     p .mirror-note { "A mirror clone includes the preserved refs:" }
-                    (clone_line(mirror_clone, "mirror-clone", "Copy mirror clone command"))
+                    (clone_line(mirror_clone, CloneKind::Mirror))
                 }
             }
         }
