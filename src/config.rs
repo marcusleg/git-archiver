@@ -1,5 +1,6 @@
 //! `config.toml`: loading, validation and the default file written on first start.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
@@ -161,10 +162,7 @@ struct RawConfig {
     hosts: Vec<(Spanned<String>, Spanned<Token>)>,
 }
 
-type Entry<'a, 'de> = (
-    &'a Spanned<std::borrow::Cow<'de, str>>,
-    &'a Spanned<DeValue<'de>>,
-);
+type Entry<'a, 'de> = (&'a Spanned<Cow<'de, str>>, &'a Spanned<DeValue<'de>>);
 
 /// The entries of `table` in file order.
 fn in_file_order<'a, 'de>(table: &'a DeTable<'de>) -> Vec<Entry<'a, 'de>> {
@@ -214,7 +212,7 @@ fn read_settings(root: &DeTable<'_>) -> Result<RawConfig, ConfigError> {
 
 /// A `hosts` entry: the host and its token.
 fn read_host(
-    host: &Spanned<std::borrow::Cow<'_, str>>,
+    host: &Spanned<Cow<'_, str>>,
     settings: &Spanned<DeValue<'_>>,
 ) -> Result<(Spanned<String>, Spanned<Token>), ConfigError> {
     let name = host.get_ref().as_ref();
@@ -303,11 +301,7 @@ impl ConfigError {
 
     /// A key that isn't one of `known`, the last of `path`. It says what was
     /// expected, but not what was found.
-    fn unknown_field(
-        key: &Spanned<std::borrow::Cow<'_, str>>,
-        path: &[&str],
-        known: &[&str],
-    ) -> Self {
+    fn unknown_field(key: &Spanned<Cow<'_, str>>, path: &[&str], known: &[&str]) -> Self {
         let names: Vec<String> = known.iter().map(|name| format!("`{name}`")).collect();
         let expected = match names.as_slice() {
             [only] => only.clone(),
@@ -315,8 +309,11 @@ impl ConfigError {
         };
         // The key is shown only if it is one of the app's names, such as
         // `interval` written inside a `hosts` entry.
-        let shown = path.last().is_some_and(|name| is_app_name(name));
-        let found = if shown { path[path.len() - 1] } else { "…" };
+        let found = path
+            .last()
+            .copied()
+            .filter(|name| is_app_name(name))
+            .unwrap_or("…");
         Self::at_key(
             key.span(),
             path,
