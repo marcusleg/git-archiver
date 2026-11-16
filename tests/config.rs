@@ -119,11 +119,17 @@ async fn a_rejected_repo_url_is_named_without_its_credentials() {
             "user:secretpw@example.com/foo/bar",
             "\"…@example.com/foo/bar\" must be an http:// or https:// URL",
         ),
+        (
+            "user:se://cretpw@example.com/foo/bar",
+            "\"…@example.com/foo/bar\" must be an http:// or https:// URL",
+        ),
     ];
     for (url, expected) in cases {
         let error = TestApp::start_error(&format!("repos = [\"{url}\"]")).await;
         assert!(error.contains(expected), "{url:?}: {error}");
         assert!(!error.contains("secretpw"), "{url:?}: {error}");
+        assert!(!error.contains("se://"), "{url:?}: {error}");
+        assert!(!error.contains("user:"), "{url:?}: {error}");
     }
 }
 
@@ -158,11 +164,16 @@ async fn a_rejected_hosts_key_is_named_without_its_credentials() {
             "[hosts.\"https://user:secret=secretpw@github.com\"]",
             "line 1, column 1: missing field `token`",
         ),
+        (
+            "[hosts.\"user:se://cretpw@github.com\"]\ntoken = \"x\"",
+            "`hosts` key \"…@github.com\" must be a host",
+        ),
     ];
     for (config, expected) in cases {
         let error = TestApp::start_error(config).await;
         assert!(error.contains(expected), "{config:?}: {error}");
         assert!(!error.contains("secretpw"), "{config:?}: {error}");
+        assert!(!error.contains("se://"), "{config:?}: {error}");
         assert!(!error.contains("user:"), "{config:?}: {error}");
     }
 }
@@ -238,12 +249,41 @@ async fn an_unknown_field_is_named_without_its_credentials() {
             "[\"user:secretpw@github.com/?x=://\"]\ntoken = \"x\"",
             "unknown field `…@github.com/?x=://`, expected one of `interval`",
         ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secret\\\"pw@github.com\" = \"x\"",
+            "line 3 (`\"https://…@github.com\"`), column 1: \
+             unknown field `https://…@github.com`, expected `token`",
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n'https://user:secret\"pw@github.com' = \"x\"",
+            "line 3 (`\"https://…@github.com\"`), column 1: \
+             unknown field `https://…@github.com`, expected `token`",
+        ),
+        (
+            "['https://user:secret\"pw@github.com']\ntoken = \"x\"",
+            "line 1, column 2: unknown field `https://…@github.com`, \
+             expected one of `interval`, `listen`, `repos`, `hosts`",
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n'https://user:secretpw\"@\"github.com' = \"x\"",
+            "line 3 (`\"https://…@\\\"github.com\"`), column 1: \
+             unknown field `https://…@\"github.com`, expected `token`",
+        ),
+        (
+            "[\"user:se://cretpw@github.com\"]\ntoken = \"x\"",
+            "line 1, column 2: unknown field `…@github.com`, \
+             expected one of `interval`, `listen`, `repos`, `hosts`",
+        ),
     ];
     for (config, expected) in cases {
         let error = TestApp::start_error(config).await;
         assert!(error.contains(expected), "{config:?}: {error}");
-        assert!(!error.contains("secretpw"), "{config:?}: {error}");
-        assert!(!error.contains("user:"), "{config:?}: {error}");
+        for shown in ["secret", "se://", "user:"] {
+            assert!(
+                !error.contains(shown),
+                "{config:?} shows {shown:?}: {error}"
+            );
+        }
     }
 }
 

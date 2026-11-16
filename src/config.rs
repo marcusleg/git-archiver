@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
 use std::net::SocketAddr;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -164,8 +165,7 @@ fn parse(text: &str) -> anyhow::Result<Config> {
 /// credentials in it hidden, and hides them in any field the message names
 /// too.
 fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
-    let message = hide_strings(error.message().trim());
-    let message = hide_field_credentials(&message);
+    let message = hide_quoted(error.message().trim());
     let Some(span) = error.span() else {
         return anyhow::anyhow!("{message}");
     };
@@ -176,7 +176,7 @@ fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let line = text[line_start..].lines().next().unwrap_or_default();
     let place = match key_set_on(line).and_then(unescaped_key) {
         Some(key) => {
-            let shown = hide_credentials(&key);
+            let shown = hide_key_credentials(&key);
             format!("line {line_number} (`{shown}`)")
         }
         None => format!("line {line_number}"),
@@ -234,6 +234,46 @@ fn unescaped_key(key: &str) -> Option<String> {
     Some(shown.join("."))
 }
 
+/// Hides what toml's message may quote from the config: any credentials in
+/// the field it names in backticks, such as
+/// ``unknown field `https://…@host`, expected `token` ``, and every
+/// double-quoted string, such as the value in
+/// `invalid type: string "…", expected a sequence`.
+fn hide_quoted(message: &str) -> String {
+    match field_span(message) {
+        Some(field) => format!(
+            "{}{}{}",
+            hide_strings(&message[..field.start]),
+            hide_credentials(&message[field.clone()]),
+            hide_strings(&message[field.end..]),
+        ),
+        None => hide_strings(message),
+    }
+}
+
+/// Where the field a message names sits: from its first backtick outside a
+/// double-quoted string to the backtick that starts what was expected, or
+/// else to its last backtick. serde quotes the field as written, without
+/// escaping, so neither a backtick nor a `"` inside it can be trusted to end
+/// it, but the field names listed after it hold neither.
+fn field_span(message: &str) -> Option<Range<usize>> {
+    let mut in_string = false;
+    let (tick, _) = message.char_indices().find(|&(_, c)| {
+        if c == '"' {
+            in_string = !in_string;
+        }
+        c == '`' && !in_string
+    })?;
+    let start = tick + 1;
+    let rest = &message[start..];
+    let end = ["`, expected", "`, there are no fields"]
+        .into_iter()
+        .filter_map(|after| rest.rfind(after))
+        .max()
+        .or_else(|| rest.rfind('`'))?;
+    Some(start..start + end)
+}
+
 /// Replaces every double-quoted string in a message, such as the value in
 /// `invalid type: string "…", expected a sequence`, with `"…"`.
 fn hide_strings(message: &str) -> String {
@@ -248,18 +288,6 @@ fn hide_strings(message: &str) -> String {
         }
     }
     hidden
-}
-
-/// Hides credentials in the field a message names, such as
-/// ``unknown field `https://user:pw@host`, expected `token` ``: everything
-/// from the first backtick to the last `@`. serde quotes the field as written,
-/// without escaping, so a backtick inside it can't be trusted to end it, but
-/// the names a message lists after it never hold an `@`.
-fn hide_field_credentials(message: &str) -> String {
-    match message.split_once('`') {
-        Some((before, field)) => format!("{before}`{}", hide_credentials(field)),
-        None => message.to_owned(),
-    }
 }
 
 fn parse_interval(text: &str) -> anyhow::Result<Duration> {
@@ -280,20 +308,49 @@ fn validate_repo_url(repo: String) -> anyhow::Result<String> {
     Ok(repo)
 }
 
-/// The text as written, with everything between a URL scheme and the last
-/// `@` replaced by `…`, so an error can name what it rejects without showing
-/// a credential in the UI or the log. Any user name and password end at an
-/// `@`, so cutting up to the last one also covers a URL that a parser reads
-/// differently than its author meant, such as one whose unencoded password
-/// holds a `#`.
+/// The text as written, with everything up to the last `@` replaced by `…`,
+/// except a URL scheme such as `https://` at its very start, so an error can
+/// name what it rejects without showing a credential in the UI or the log.
+/// Any user name and password end at an `@`, so cutting up to the last one
+/// also covers a URL that a parser reads differently than its author meant,
+/// such as one whose unencoded password holds a `#`. A `://` anywhere else,
+/// such as inside a password or a query, starts no scheme.
 fn hide_credentials(text: &str) -> String {
     let Some(at) = text.rfind('@') else {
         return text.to_owned();
     };
-    // Only a `://` before the `@` starts a scheme; one after it may sit in
-    // the path or query, past any credentials.
-    let start = text[..at].find("://").map_or(0, |i| i + "://".len());
+    let start = scheme_len(&text[..at]);
     format!("{}…{}", &text[..start], &text[at..])
+}
+
+/// The length of the URL scheme and `://` the text starts with, or 0.
+fn scheme_len(text: &str) -> usize {
+    let name = text
+        .find(|c: char| !(c.is_ascii_alphanumeric() || "+-.".contains(c)))
+        .unwrap_or(text.len());
+    let starts_with_letter = text.starts_with(|c: char| c.is_ascii_alphabetic());
+    if starts_with_letter && text[name..].starts_with("://") {
+        name + "://".len()
+    } else {
+        0
+    }
+}
+
+/// A key as [`unescaped_key`] shows it, such as
+/// `hosts."https://…@github.com".token`, with its credentials hidden. Only a
+/// quoted part of a key can hold them, as a bare part can't hold a `:` or
+/// `@`, so any bare parts before the first quote are kept along with it, and
+/// the rest is hidden like any text.
+fn hide_key_credentials(key: &str) -> String {
+    let kept = key
+        .find('"')
+        .filter(|&quote| {
+            key[..quote]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c))
+        })
+        .map_or(0, |quote| quote + 1);
+    format!("{}{}", &key[..kept], hide_credentials(&key[kept..]))
 }
 
 /// The repo's identity if the config would accept this URL; otherwise why
