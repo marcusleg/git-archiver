@@ -73,6 +73,14 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
             "`hosts.\"github.com\".token` must not be empty",
         ),
         ("[hosts.\"github.com\"]\ntokn = \"x\"", "tokn"),
+        (
+            "[hosts.\"https://github.com\"]\ntoken = \"x\"",
+            "`hosts` key \"https://github.com\" must be a host",
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"x\"\n[hosts.\"GitHub.com\"]\ntoken = \"y\"",
+            "more than once",
+        ),
     ];
     for (config, expected) in cases {
         let error = TestApp::start_error(config).await;

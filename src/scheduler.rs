@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 
 use crate::archive::{Archives, FetchError};
 use crate::clock::Clock;
-use crate::config;
+use crate::config::{self, Tokens};
 use crate::overview::{Overview, SharedOverview, Tracked, tracked};
 use crate::state::Status;
 
@@ -31,6 +31,9 @@ pub struct Scheduler {
     pub overview: SharedOverview,
     /// Wakes the scheduler from waiting, after a repo jumped the queue.
     pub wake: Arc<Notify>,
+    /// From the last good config, so a changed token counts from the next
+    /// fetch.
+    pub tokens: Tokens,
     /// The last config error logged, so a broken file is logged once.
     pub config_error: Option<String>,
 }
@@ -57,11 +60,11 @@ impl Scheduler {
         }
     }
 
-    /// Re-reads the repo list. An unreadable or invalid config keeps the
-    /// last good list. Queued repos no longer tracked leave the queue.
+    /// Re-reads the repo list and tokens. An unreadable or invalid config
+    /// keeps the last good ones. Queued repos no longer tracked leave the queue.
     fn reload_tracked(&mut self) {
         let overview = &self.overview;
-        let error = config::load_locked(&self.config_path, |config| {
+        let result = config::load_locked(&self.config_path, |config| {
             let config = config.map_err(|e| format!("{e:#}"))?;
             let mut overview = overview.lock().unwrap();
             overview.tracked = tracked(&config.repos);
@@ -71,10 +74,13 @@ impl Scheduler {
                 ..
             } = &mut *overview;
             fetch_first.retain(|id| tracked.iter().any(|t| t.id == *id));
-            Ok(())
+            Ok(config.tokens)
         });
-        match error {
-            Ok(()) => self.config_error = None,
+        match result {
+            Ok(tokens) => {
+                self.tokens = tokens;
+                self.config_error = None;
+            }
             Err(error) => {
                 if self.config_error.as_ref() != Some(&error) {
                     tracing::error!(error, "keeping the last good config");
@@ -127,7 +133,7 @@ impl Scheduler {
         let timer = Instant::now();
         tracing::info!(repo = %repo.id, "fetching");
         let result = tokio::select! {
-            result = self.archives.fetch(&repo.id, &repo.url, attempt) => result,
+            result = self.archives.fetch(&repo.id, &repo.url, attempt, self.tokens.for_repo(&repo.id)) => result,
             () = self.clock.sleep_until(attempt + FETCH_TIMEOUT) => Err(FetchError::Failed {
                 reason: format!(
                     "fetch timed out after {}",

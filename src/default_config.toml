@@ -15,7 +15,9 @@ repos = [
   # "https://github.com/owner/repo",
 ]
 
-# Optional token per host, used only when fetching from that host, for example
-# to avoid anonymous clone rate limits. It is never shown in the UI.
+# Optional token per host, for example to avoid anonymous clone rate limits.
+# It's sent, as the HTTP basic auth password, only to that host, for every
+# repo whose URL names it (with the port, if the URL has one). Changes count
+# from the next fetch. It is never shown in the UI or logs.
 # [hosts."github.com"]
 # token = "ghp_..."
