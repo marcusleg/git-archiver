@@ -93,7 +93,7 @@ async fn metrics_report_status_last_success_size_next_fetch_and_fetch_duration()
 
     let never = [("repo", "https://example.com/never/fetched")];
     assert_eq!(
-        metrics.value("archiver_repo_last_success_timestamp_seconds", &never),
+        metrics.last_success("https://example.com/never/fetched"),
         None
     );
     assert_eq!(metrics.value("archiver_repo_size_bytes", &never), None);
