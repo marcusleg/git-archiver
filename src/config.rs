@@ -160,8 +160,9 @@ fn parse(text: &str) -> anyhow::Result<Config> {
 
 /// Names the place and the problem but, unlike toml's own message, doesn't
 /// quote the line or any string value, either of which may be a token. Names
-/// the key instead, if the line sets one, with any credentials in it hidden,
-/// and hides them in any field the message names too.
+/// the key instead, if the line sets one that toml can read, with any
+/// credentials in it hidden, and hides them in any field the message names
+/// too.
 fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let message = hide_strings(error.message().trim());
     let message = hide_field_credentials(&message);
@@ -173,9 +174,9 @@ fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let line_number = text[..start].matches('\n').count() + 1;
     let column = text[line_start..start].chars().count() + 1;
     let line = text[line_start..].lines().next().unwrap_or_default();
-    let place = match key_set_on(line) {
+    let place = match key_set_on(line).and_then(read_key) {
         Some(key) => {
-            let shown = hide_credentials(key);
+            let shown = hide_credentials(&key);
             format!("line {line_number} (`{shown}`)")
         }
         None => format!("line {line_number}"),
@@ -206,6 +207,30 @@ fn key_set_on(line: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// The key as toml reads it, escapes applied, so that hiding credentials
+/// finds an `@` however it's written, such as `\u0040`. Each part of a
+/// dotted key is shown bare if it can be, and quoted otherwise. None if toml
+/// can't read the key.
+fn read_key(key: &str) -> Option<String> {
+    let parts = toml_edit::Key::parse(key).ok()?;
+    let shown: Vec<String> = parts
+        .iter()
+        .map(|part| {
+            let part = part.get();
+            let bare = !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if bare {
+                part.to_owned()
+            } else {
+                format!("{part:?}")
+            }
+        })
+        .collect();
+    Some(shown.join("."))
 }
 
 /// Replaces every double-quoted string in a message, such as the value in
