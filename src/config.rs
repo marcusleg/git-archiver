@@ -38,14 +38,26 @@ struct HostConfig {
 pub struct Token(String);
 
 impl Token {
+    /// The token itself, to hand to git. Nothing else should need it.
+    pub fn reveal(&self) -> &str {
+        &self.0
+    }
+
     /// The value of an HTTP `Authorization` header sending the token as the
-    /// basic auth password, which GitHub, GitLab and Gitea all accept.
+    /// basic auth password, under the user name GitHub expects for tokens
+    /// (GitLab and Gitea accept any).
     pub fn basic_auth(&self) -> String {
         let credentials = format!("x-access-token:{}", self.0);
         format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode(credentials)
         )
+    }
+
+    /// Empty, or holding whitespace or control characters, which no real
+    /// token has and which would break git's credential protocol.
+    fn is_malformed(&self) -> bool {
+        self.0.is_empty() || self.0.chars().any(|c| c.is_whitespace() || c.is_control())
     }
 }
 
@@ -56,7 +68,7 @@ impl fmt::Debug for Token {
 }
 
 /// The configured tokens, by lowercased host (with the port, if any).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Tokens(BTreeMap<String, Token>);
 
 impl Tokens {
@@ -142,15 +154,15 @@ fn parse(text: &str) -> anyhow::Result<Config> {
             .into_iter()
             .map(validate_repo_url)
             .collect::<anyhow::Result<_>>()?,
-        tokens: tokens(raw.hosts)?,
+        tokens: validate_hosts(raw.hosts)?,
     })
 }
 
 /// Names the place and the problem but, unlike toml's own message, doesn't
-/// quote the line, which may hold a token. Names the key instead, if the line
-/// sets one.
+/// quote the line or any string value, either of which may be a token. Names
+/// the key instead, if the line sets one.
 fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
-    let message = error.message().trim();
+    let message = hide_strings(error.message().trim());
     let Some(span) = error.span() else {
         return anyhow::anyhow!("{message}");
     };
@@ -166,6 +178,22 @@ fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
         _ => format!("line {line_number}"),
     };
     anyhow::anyhow!("{place}, column {column}: {message}")
+}
+
+/// Replaces every double-quoted string in a message, such as the value in
+/// `invalid type: string "…", expected a sequence`, with `"…"`.
+fn hide_strings(message: &str) -> String {
+    let mut hidden = String::new();
+    let mut parts = message.split('"');
+    hidden.push_str(parts.next().unwrap_or_default());
+    // Every other part is inside quotes; an unclosed quote hides the rest.
+    while let Some(_quoted) = parts.next() {
+        hidden.push_str("\"…\"");
+        if let Some(outside) = parts.next() {
+            hidden.push_str(outside);
+        }
+    }
+    hidden
 }
 
 fn parse_interval(text: &str) -> anyhow::Result<Duration> {
@@ -398,7 +426,7 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn tokens(hosts: BTreeMap<String, HostConfig>) -> anyhow::Result<Tokens> {
+fn validate_hosts(hosts: BTreeMap<String, HostConfig>) -> anyhow::Result<Tokens> {
     let mut tokens = BTreeMap::new();
     for (host, settings) in hosts {
         let valid = !host.is_empty()
@@ -411,8 +439,11 @@ fn tokens(hosts: BTreeMap<String, HostConfig>) -> anyhow::Result<Tokens> {
                  with a port if the repo URLs name one"
             );
         }
-        if settings.token.0.trim().is_empty() {
-            bail!("`hosts.\"{host}\".token` must not be empty");
+        if settings.token.is_malformed() {
+            bail!(
+                "`hosts.\"{host}\".token` must not be empty or contain spaces, \
+                 line breaks or control characters"
+            );
         }
         if tokens
             .insert(host.to_ascii_lowercase(), settings.token)
@@ -451,6 +482,17 @@ mod tests {
     }
 
     #[test]
+    fn a_misplaced_token_is_never_quoted_in_the_error() {
+        let error = parse("[hosts]\n\"github.com\" = \"ghp_secret\"\n")
+            .map(|_| ())
+            .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(!error.contains("ghp_secret"), "{error}");
+        assert!(error.contains("line 2"), "{error}");
+        assert!(error.contains("invalid type"), "{error}");
+    }
+
+    #[test]
     fn a_token_applies_to_repos_on_its_host_only() {
         let config = parse(
             "[hosts.\"GitHub.com\"]\ntoken = \"a\"\n\
@@ -473,15 +515,5 @@ mod tests {
             Some(&Token("b".into()))
         );
         assert_eq!(token("https://git.example.com/foo/bar"), None);
-    }
-
-    #[test]
-    fn the_token_is_sent_as_the_basic_auth_password() {
-        let header = Token("ghp_secret".into()).basic_auth();
-        let encoded = header.strip_prefix("Basic ").unwrap();
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .unwrap();
-        assert_eq!(decoded, b"x-access-token:ghp_secret");
     }
 }

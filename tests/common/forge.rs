@@ -38,6 +38,9 @@ struct Behaviour {
     required_token: Mutex<Option<String>>,
     /// Every `Authorization` header received, in order.
     authorizations: Mutex<Vec<String>>,
+    /// Repo path prefixes whose requests are redirected, with the URL each
+    /// redirects to.
+    redirects: Mutex<Vec<(String, String)>>,
 }
 
 /// A way the forge can refuse or fail to serve a repo.
@@ -79,6 +82,7 @@ impl FakeForge {
             hung_requests: AtomicUsize::new(0),
             required_token: Mutex::default(),
             authorizations: Mutex::default(),
+            redirects: Mutex::default(),
         });
         let router = axum::Router::new()
             .fallback(http_backend)
@@ -140,6 +144,17 @@ impl FakeForge {
     /// with 401 Unauthorized.
     pub fn require_token(&self, token: &str) {
         *self.behaviour.required_token.lock().unwrap() = Some(token.to_owned());
+    }
+
+    /// Redirects every request for the repo at `path` to the same request
+    /// for the repo at `to`, which may be on another forge, the way a host
+    /// answers for a moved repo.
+    pub fn redirect(&self, path: &str, to: &Upstream) {
+        self.behaviour
+            .redirects
+            .lock()
+            .unwrap()
+            .push((format!("/{path}.git/"), format!("{}/", to.url())));
     }
 
     /// Every `Authorization` header the forge has received.
@@ -300,6 +315,25 @@ async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request)
     };
     if let Some(failure) = failure {
         return fail(&behaviour, failure).await;
+    }
+    let redirect = {
+        let redirects = behaviour.redirects.lock().unwrap();
+        redirects.iter().find_map(|(prefix, to)| {
+            let rest = parts.uri.path().strip_prefix(prefix.as_str())?;
+            let query = parts
+                .uri
+                .query()
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default();
+            Some(format!("{to}{rest}{query}"))
+        })
+    };
+    if let Some(location) = redirect {
+        return Response::builder()
+            .status(StatusCode::MOVED_PERMANENTLY)
+            .header("location", location)
+            .body(Body::empty())
+            .unwrap();
     }
     let required = behaviour.required_token.lock().unwrap().clone();
     if let Some(required) = required

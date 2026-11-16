@@ -194,7 +194,7 @@ impl Archives {
             url,
         ];
         args.extend(refspecs.iter().map(String::as_str));
-        git_upstream(&archive, &args, token).await?;
+        git_upstream(&archive, &args, url, token).await?;
 
         let staged = list_refs(&archive, &[STAGING]).await?;
         let archived = list_refs(&archive, &["refs/heads/", "refs/tags/"]).await?;
@@ -370,7 +370,7 @@ async fn upstream_default_branch(
     token: Option<&Token>,
 ) -> anyhow::Result<Option<String>> {
     let args = ["ls-remote", "--symref", url, "HEAD"];
-    let output = git_upstream(Path::new("."), &args, token).await?;
+    let output = git_upstream(Path::new("."), &args, url, token).await?;
     let branch = output.lines().find_map(|line| {
         let (target, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
         (name == "HEAD").then_some(target)
@@ -439,25 +439,66 @@ async fn rev_parse(archive: &Path, rev: &str) -> anyhow::Result<Option<String>> 
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
-/// Runs a git command that talks to upstream. Its failure is a
-/// [`FetchError`], classified from git's stderr.
+async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    git_with_input(dir, args, "").await
+}
+
+async fn git_with_input(dir: &Path, args: &[&str], input: &str) -> anyhow::Result<String> {
+    run_git(command(dir, args), dir, args, input).await
+}
+
+/// Runs a git command that talks to the upstream at `url`, sending it the
+/// token if there is one. Its failure is a [`FetchError`], classified from
+/// git's stderr.
 ///
-/// The token, if any, travels as an `http.extraHeader` set through git's
-/// `GIT_CONFIG_*` environment variables, so it never shows up in process
-/// arguments and is never written to the archive's config. Unlike a
-/// credential helper, it goes out with the first request, which is what lifts
-/// anonymous rate limits.
-async fn git_upstream(dir: &Path, args: &[&str], token: Option<&Token>) -> anyhow::Result<String> {
-    let mut command = command(dir, args);
-    if let Some(token) = token {
-        command
-            .env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-            .env(
-                "GIT_CONFIG_VALUE_0",
-                format!("Authorization: {}", token.basic_auth()),
-            );
+/// The token reaches git only through its environment, set through git's
+/// `GIT_CONFIG_*` variables, so it never shows up in process arguments and is
+/// never written to the archive's config. It goes out with the first request,
+/// which is what lifts anonymous rate limits, but with redirects off, because
+/// git would send it on to wherever upstream redirects. If upstream does
+/// redirect, as hosts do for moved repos, the command runs again following
+/// redirects, with the token offered only by a credential helper scoped to
+/// `url`'s scheme, host and port: git then hands it over only if that host
+/// answers 401, and never to another host.
+async fn git_upstream(
+    dir: &Path,
+    args: &[&str],
+    url: &str,
+    token: Option<&Token>,
+) -> anyhow::Result<String> {
+    let Some(token) = token else {
+        return run_upstream(command(dir, args)).await;
+    };
+    let mut direct = command(dir, args);
+    with_config(
+        &mut direct,
+        &[
+            ("http.followRedirects", "false"),
+            (
+                "http.extraHeader",
+                &format!("Authorization: {}", token.basic_auth()),
+            ),
+        ],
+    );
+    match run_upstream(direct).await {
+        Err(e) if format!("{e:#}").contains("The requested URL returned error: 30") => {}
+        result => return result,
     }
+
+    let origin = url::Url::parse(url)
+        .with_context(|| format!("{url:?} is not a valid URL"))?
+        .origin()
+        .ascii_serialization();
+    let mut redirected = command(dir, args);
+    with_config(
+        &mut redirected,
+        &[(&format!("credential.{origin}.helper"), CREDENTIAL_HELPER)],
+    );
+    redirected.env(TOKEN_VARIABLE, token.reveal());
+    run_upstream(redirected).await
+}
+
+async fn run_upstream(mut command: Command) -> anyhow::Result<String> {
     let output = command.output().await.context("couldn't run git")?;
     if !output.status.success() {
         return Err(classify(&String::from_utf8_lossy(&output.stderr)).into());
@@ -465,15 +506,26 @@ async fn git_upstream(dir: &Path, args: &[&str], token: Option<&Token>) -> anyho
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    git_with_input(dir, args, "").await
+/// Sets git config for one command through the environment.
+fn with_config(command: &mut Command, settings: &[(&str, &str)]) {
+    command.env("GIT_CONFIG_COUNT", settings.len().to_string());
+    for (i, (key, value)) in settings.iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{i}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
 }
 
-async fn git_with_input(dir: &Path, args: &[&str], input: &str) -> anyhow::Result<String> {
-    run(command(dir, args), dir, args, input).await
-}
+/// Where the credential helper finds the token.
+const TOKEN_VARIABLE: &str = "ARCHIVER_UPSTREAM_TOKEN";
 
-async fn run(
+/// Answers git's `get` requests with the token as the password, under the
+/// user name GitHub expects for tokens (GitLab and Gitea accept any), and
+/// ignores `store` and `erase`, so nothing is ever saved.
+const CREDENTIAL_HELPER: &str = "!f() { test \"$1\" = get || return 0; \
+     echo username=x-access-token; echo \"password=$ARCHIVER_UPSTREAM_TOKEN\"; }; f";
+
+async fn run_git(
     mut command: Command,
     dir: &Path,
     args: &[&str],
