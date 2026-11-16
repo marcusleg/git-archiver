@@ -358,3 +358,38 @@ async fn the_token_never_appears_in_the_logs_of_good_or_failed_fetches() {
     assert_hidden(&log, WRONG_TOKEN, "the log");
     assert_hidden(&log.to_ascii_lowercase(), "authorization:", "the log");
 }
+
+#[tokio::test]
+async fn the_add_form_checks_a_repo_with_its_hosts_token() {
+    let forge = FakeForge::start().await;
+    forge.require_token(TOKEN);
+    let upstream = forge.create_repo("private/repo");
+    upstream.commit("first");
+    let app = TestApp::with_config(&config_with_token(&[], &forge.host(), TOKEN)).await;
+
+    let page = app.add_repo(upstream.url()).await;
+    app.settle().await;
+
+    assert_hidden(&page.text(), TOKEN, "the page after adding");
+    assert!(app.config().contains(upstream.url()), "{}", app.config());
+    let metrics = app.metrics().await;
+    assert!(
+        metrics
+            .last_success(&repo_id(&forge, "private/repo"))
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn without_the_token_the_add_form_refuses_a_repo_that_requires_one() {
+    let forge = FakeForge::start().await;
+    forge.require_token(TOKEN);
+    let upstream = forge.create_repo("private/repo");
+    upstream.commit("first");
+    let app = TestApp::start().await;
+
+    let page = app.add_repo(upstream.url()).await;
+
+    assert!(page.text().contains("Couldn’t reach"), "{}", page.text());
+    assert!(!app.config().contains(upstream.url()), "{}", app.config());
+}
