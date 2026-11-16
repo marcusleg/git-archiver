@@ -5,24 +5,20 @@ use std::fmt::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::identity::RepoId;
-use crate::overview::{Overview, Untracked};
+use crate::overview::View;
 use crate::state::{RepoState, Status};
 
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-/// Renders every metric. Per-repo metrics cover the tracked repos and the
-/// `untracked` archives. `preserved_refs` holds the number of preserved refs
+/// Renders every metric. Per-repo metrics cover every repo in the view.
+/// `preserved_refs` holds the number of preserved refs
 /// in each of their archives, by repo identity, for the repos that have one.
-pub fn render(
-    overview: &Overview,
-    untracked: &[Untracked],
-    preserved_refs: &BTreeMap<String, usize>,
-) -> String {
+pub fn render(overview: &View, preserved_refs: &BTreeMap<String, usize>) -> String {
     // Each repo with whether it's tracked and its state, if it has any.
     let repos: Vec<(&RepoId, bool, Option<&RepoState>)> = overview
-        .tracked_with_state()
-        .map(|(t, state)| (&t.id, true, state))
-        .chain(untracked.iter().map(|u| (&u.id, false, u.state.as_ref())))
+        .repos
+        .iter()
+        .map(|r| (&r.id, r.tracked, r.state.as_ref()))
         .collect();
     let per_repo = |value: fn(&RepoState) -> Option<f64>| {
         repos

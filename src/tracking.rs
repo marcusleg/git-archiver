@@ -14,7 +14,7 @@ use crate::archive::{self, Archives};
 use crate::clock::Clock;
 use crate::config::{self, EditError, RepoListChange, Tokens};
 use crate::identity::RepoId;
-use crate::overview::{Overview, SharedOverview, save_state};
+use crate::overview::SharedOverview;
 
 /// How long tracking waits for upstream to answer.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -24,7 +24,6 @@ pub struct Tracking {
     clock: Arc<dyn Clock>,
     overview: SharedOverview,
     archives: Arc<Archives>,
-    state_path: PathBuf,
     /// Wakes the scheduler from waiting, after the tracked set changed or a
     /// repo jumped the queue. Stores a permit, so a wake while the scheduler
     /// is busy isn't lost.
@@ -76,14 +75,12 @@ pub enum UntrackOutcome {
 impl Tracking {
     pub fn new(
         config_path: PathBuf,
-        state_path: PathBuf,
         clock: Arc<dyn Clock>,
         overview: SharedOverview,
         archives: Arc<Archives>,
     ) -> Self {
         Self {
             config_path,
-            state_path,
             clock,
             overview,
             archives,
@@ -118,12 +115,7 @@ impl Tracking {
         let edited = config::edit_repo_list(
             &self.config_path,
             RepoListChange::Add { url, id: &id },
-            |repos| {
-                let mut overview = self.overview.lock().unwrap();
-                overview.set_tracked(repos);
-                overview.fetch_first.push(id.clone());
-                overview.next_fetch = Some(self.clock.now());
-            },
+            |repos| self.overview.track_first(repos, &id, self.clock.now()),
         );
         if let Err(e) = edited {
             return self.track_error(e);
@@ -170,8 +162,7 @@ impl Tracking {
             tracing::error!(repo = %id, error = %format!("{e:#}"), "couldn't delete archive");
             return UntrackOutcome::ArchiveNotDeleted(e.root_cause().to_string());
         }
-        self.overview.lock().unwrap().forget(id);
-        save_state(&self.overview, &self.state_path);
+        self.overview.forget(id);
         tracing::info!(repo = %id, "deleted archive");
         UntrackOutcome::Untracked
     }
@@ -182,7 +173,7 @@ impl Tracking {
         let shown_tracked = self.is_tracked(id);
         let edited =
             config::edit_repo_list(&self.config_path, RepoListChange::Remove { id }, |repos| {
-                self.overview.lock().unwrap().set_tracked(repos)
+                self.overview.set_tracked(repos)
             });
         let removed = match edited {
             Ok(edited) => edited == config::Edited::Changed,
@@ -213,31 +204,13 @@ impl Tracking {
     pub fn reload(&self) -> Result<Tokens, String> {
         config::load_locked(&self.config_path, |config| {
             let config = config.map_err(|e| format!("{e:#}"))?;
-            self.overview.lock().unwrap().set_tracked(&config.repos);
+            self.overview.set_tracked(&config.repos);
             Ok(config.tokens)
         })
     }
 
     pub fn is_tracked(&self, id: &RepoId) -> bool {
-        self.overview.lock().unwrap().is_tracked(id)
-    }
-
-    /// The repo to fetch before any scheduled fetch: the first queued repo
-    /// that is still tracked.
-    pub fn fetch_first(overview: &Overview) -> Option<&crate::overview::Tracked> {
-        overview
-            .fetch_first
-            .iter()
-            .find_map(|id| overview.tracked.iter().find(|t| &t.id == id))
-    }
-
-    /// Takes the repo off the fetch-first queue, once it has been fetched.
-    pub fn fetched(&self, id: &RepoId) {
-        self.overview
-            .lock()
-            .unwrap()
-            .fetch_first
-            .retain(|queued| queued != id);
+        self.overview.is_tracked(id)
     }
 
     /// Resolves when something changed that the scheduler should look at: a

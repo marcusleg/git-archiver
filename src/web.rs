@@ -19,7 +19,7 @@ use crate::clock::Clock;
 use crate::git_http;
 use crate::identity::RepoId;
 use crate::metrics;
-use crate::overview::SharedOverview;
+use crate::overview::{RepoView, SharedOverview};
 use crate::state::{RepoState, Status};
 use crate::tracking::{ArchiveChoice, TrackOutcome, Tracking, UntrackOutcome};
 
@@ -64,20 +64,11 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     let on_disk = state.archives.list().await;
-    let (ids, untracked) = {
-        let overview = state.overview.lock().unwrap();
-        let untracked = overview.untracked(&on_disk);
-        let ids: Vec<RepoId> = overview
-            .tracked
-            .iter()
-            .map(|t| t.id.clone())
-            .chain(untracked.iter().map(|u| u.id.clone()))
-            .collect();
-        (ids, untracked)
-    };
+    let view = state.overview.view(&on_disk);
     let mut preserved_refs = BTreeMap::new();
-    for id in ids {
-        match state.archives.preserved(&id).await {
+    for repo in &view.repos {
+        let id = &repo.id;
+        match state.archives.preserved(id).await {
             Ok(Some(refs)) => {
                 preserved_refs.insert(id.to_string(), refs.len());
             }
@@ -87,7 +78,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
             }
         }
     }
-    let body = metrics::render(&state.overview.lock().unwrap(), &untracked, &preserved_refs);
+    let body = metrics::render(&view, &preserved_refs);
     ([(header::CONTENT_TYPE, metrics::CONTENT_TYPE)], body).into_response()
 }
 
@@ -296,25 +287,16 @@ async fn render_list(
     base: &str,
 ) -> Html<String> {
     let on_disk = app.archives.list().await;
-    let (tracked, untracked, config_error) = {
-        let overview = app.overview.lock().unwrap();
-        let tracked: Vec<_> = overview
-            .tracked_with_state()
-            .map(|(t, state)| {
-                (
-                    t.url.clone(),
-                    t.id.clone(),
-                    state.cloned().unwrap_or_default(),
-                )
-            })
-            .collect();
-        let untracked: Vec<_> = overview
-            .untracked(&on_disk)
+    let view = app.overview.view(&on_disk);
+    let config_error = view.config_error;
+    let (tracked, untracked): (Vec<_>, Vec<_>) = view.repos.into_iter().partition(|r| r.tracked);
+    let archives = |repos: Vec<RepoView>| {
+        repos
             .into_iter()
-            .map(|u| (u.id.to_string(), u.id, u.state.unwrap_or_default()))
-            .collect();
-        (tracked, untracked, overview.config_error.clone())
+            .map(|r| (r.title, r.id, r.state.unwrap_or_default()))
+            .collect::<Vec<_>>()
     };
+    let (tracked, untracked) = (archives(tracked), archives(untracked));
     let cards = card_views(app, tracked).await;
     let untracked_cards = card_views(app, untracked).await;
     let now = app.clock.now();
