@@ -1,0 +1,21 @@
+# Git Archiver configuration.
+#
+# The app wrote this file on first start and never overwrites it.
+# Every setting is listed below with its default value.
+
+# Every tracked repo is fetched once per interval, with fetches spread evenly
+# across it. A duration such as "24h", "90m" or "1h 30m".
+interval = "24h"
+
+# Address and port the web UI listens on.
+listen = "0.0.0.0:8080"
+
+# URLs of the repos to archive.
+repos = [
+  # "https://github.com/owner/repo",
+]
+
+# Optional token per host, used only when fetching from that host, for example
+# to avoid anonymous clone rate limits. It is never shown in the UI.
+# [hosts."github.com"]
+# token = "ghp_..."

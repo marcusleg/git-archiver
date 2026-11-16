@@ -1,0 +1,260 @@
+/* Git Archiver: the "Marcus Legendre" design system, dark theme only.
+   Cards sit on `surface` over the `page` ground; inputs and code inside
+   cards take `bg`. */
+
+@font-face {
+  font-family: Inter;
+  src: url(fonts/inter-latin-400.woff2) format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: Inter;
+  src: url(fonts/inter-latin-700.woff2) format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url(fonts/jetbrains-mono-latin-400.woff2) format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  --page: #0c0d0a;
+  --bg: #121310;
+  --surface: #1a1b15;
+  --surface-hover: #20211a;
+  --fg: #f8f8f2;
+  --muted: #8c8875;
+  --border: #3a3a30;
+
+  --monokai-purple: #ae81ff;
+  --monokai-orange: #fd971f;
+  --monokai-pink: #f92672;
+  --monokai-cyan: #66d9ef;
+  --monokai-green: #a6e22e;
+
+  --accent-purple: var(--monokai-purple);
+  --accent-pink: var(--monokai-pink);
+  --accent-orange: var(--monokai-orange);
+  --accent-cyan: var(--monokai-cyan);
+  --accent-green: var(--monokai-green);
+  --on-accent: #121310;
+
+  --primary: var(--accent-purple);
+  --focus: var(--accent-pink);
+  --danger: var(--accent-pink);
+
+  --rule-start: var(--monokai-orange);
+  --rule-mid: var(--monokai-pink);
+  --rule-end: var(--monokai-purple);
+  --rule-height: 3px;
+
+  --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Fira Code", "Cascadia Code", monospace;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+
+  --header-height: 3.5rem;
+  --list-width: 56rem;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.5;
+  background: var(--page);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+a {
+  color: var(--primary);
+  text-underline-offset: 2px;
+  transition: color 200ms;
+}
+
+a:hover {
+  color: var(--fg);
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  color: var(--accent-cyan);
+  background: var(--bg);
+  padding: 0.125em 0.375em;
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+/* Header with the app name over the gradient rule */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  height: var(--header-height);
+  padding-inline: var(--space-4);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  position: relative;
+  padding-block: 0.3em;
+  color: var(--fg);
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.brand:hover {
+  color: var(--fg);
+}
+
+.brand::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: var(--rule-height);
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--rule-start) 0%, var(--rule-mid) 50%, var(--rule-end) 100%);
+  transform-origin: left;
+  transition: transform 0.25s ease;
+}
+
+.brand:hover::after,
+.brand:focus-visible::after {
+  transform: scaleX(0.35);
+}
+
+/* Main column */
+
+main {
+  max-width: var(--list-width);
+  margin-inline: auto;
+  padding: var(--space-6) var(--space-4);
+}
+
+.section-label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.count {
+  font-variant-numeric: tabular-nums;
+}
+
+.repos {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Cards: lifted off the page by `surface` and a 1px border, never a shadow */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+}
+
+.repo-url {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+/* Empty state */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding-block: var(--space-6);
+  text-align: center;
+}
+
+.empty .icon {
+  width: 2rem;
+  height: 2rem;
+  color: var(--muted);
+}
+
+.empty h2 {
+  margin: 0;
+  font-size: 1.125rem;
+  line-height: 1.5;
+}
+
+.empty p {
+  margin: 0;
+  max-width: 32rem;
+  color: var(--muted);
+}
+
+.icon {
+  flex: none;
+  width: 1em;
+  height: 1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
+}
