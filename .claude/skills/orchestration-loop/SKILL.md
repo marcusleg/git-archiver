@@ -115,7 +115,8 @@ Clean up only after `gh pr view <url> --json state` says `MERGED`:
 
 1. `hc kill <terminal>`, then `herdr-app do space.close --id <space-id> --confirmed true`. The worker must be gone before its folder is removed.
 2. `git worktree remove <path>` without `--force`. If it refuses, uncommitted work is left: report it instead of discarding it.
-3. `git branch -D <branch>`, then `git fetch origin`.
+3. `git branch -D <branch>`.
+4. Update the main checkout. If it is on `<default-branch>`, run `git pull --ff-only` there. If it is on another branch, or the pull refuses because of local changes, tell the user once and leave the checkout alone. Workers branch from `origin/<default-branch>`, so the loop doesn't depend on this step.
 
 The merge closes the issue (the PR says `Closes #<n>`), which may unblock others. Go back to step 2.
 
