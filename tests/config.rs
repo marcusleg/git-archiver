@@ -354,6 +354,11 @@ token = "ghp_secretpw"
             "[\"user:se://cretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
             format!("line 1, column 2: unknown field `…`, {top_level}"),
         ),
+        // An unknown field named like a setting is shown, being no secret.
+        (
+            "[hosts.\"github.com\"]\ntoken = \"ghp_secretpw\"\ninterval = 5",
+            r#"line 3 (`hosts."github.com".interval`), column 1: unknown field `interval`, expected `token`"#.into(),
+        ),
         // A token written as a key, or as a `hosts` key, which an error
         // names only if it looks like a domain name.
         (
