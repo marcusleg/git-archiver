@@ -325,9 +325,8 @@ pub fn remove_repo(
         .with_context(|| format!("couldn't read config {}", path.display()))
         .map_err(RemoveError::Io)?;
     let config = parse(&text).map_err(RemoveError::Invalid)?;
-    let same_archive = |repo: &str| {
-        RepoId::from_url(repo).is_ok_and(|other| other.archive_path() == id.archive_path())
-    };
+    let same_archive =
+        |repo: &str| RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id));
     let expected: Vec<String> = config
         .repos
         .iter()
@@ -357,24 +356,31 @@ pub fn remove_repo(
 /// The config text without the `repos` entries `remove` picks, keeping the
 /// file's line endings.
 fn remove_entries(text: &str, remove: impl Fn(&str) -> bool) -> anyhow::Result<String> {
-    let crlf = text.contains("\r\n");
-    let text = text.replace("\r\n", "\n");
-    let mut doc: DocumentMut = text.parse()?;
-    let repos = doc
-        .get_mut("repos")
-        .and_then(|repos| repos.as_array_mut())
-        .context("`repos` is not an array")?;
-    for i in (0..repos.len()).rev() {
-        if repos.get(i).and_then(Value::as_str).is_some_and(&remove) {
-            remove_formatted(repos, i);
+    keeping_line_endings(text, |text| {
+        let mut doc: DocumentMut = text.parse()?;
+        let repos = doc
+            .get_mut("repos")
+            .and_then(|repos| repos.as_array_mut())
+            .context("`repos` is not an array")?;
+        for i in (0..repos.len()).rev() {
+            if repos.get(i).and_then(Value::as_str).is_some_and(&remove) {
+                remove_formatted(repos, i);
+            }
         }
-    }
-    let edited = doc.to_string();
-    Ok(if crlf {
-        edited.replace('\n', "\r\n")
-    } else {
-        edited
+        Ok(doc.to_string())
     })
+}
+
+/// Runs `edit` on the text with `\n` line endings, and gives the result the
+/// text's own line endings back.
+fn keeping_line_endings(
+    text: &str,
+    edit: impl FnOnce(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    if !text.contains("\r\n") {
+        return edit(text);
+    }
+    Ok(edit(&text.replace("\r\n", "\n"))?.replace('\n', "\r\n"))
 }
 
 /// Removes the array's entry at `index` the way a person would: an entry on
@@ -434,9 +440,10 @@ fn read_for_add(path: &Path, id: &RepoId) -> Result<(String, Config), AddError> 
     let config = parse(&text).map_err(AddError::Invalid)?;
     // URLs differing only in scheme share an archive, so they count as the
     // same repo here.
-    let tracked = config.repos.iter().find(|repo| {
-        RepoId::from_url(repo).is_ok_and(|other| other.archive_path() == id.archive_path())
-    });
+    let tracked = config
+        .repos
+        .iter()
+        .find(|repo| RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id)));
     match tracked {
         Some(existing) => Err(AddError::AlreadyTracked(existing.clone())),
         None => Ok((text, config)),
@@ -446,26 +453,21 @@ fn read_for_add(path: &Path, id: &RepoId) -> Result<(String, Config), AddError> 
 /// The config text with `url` appended to `repos`, laid out like the entries
 /// around it and keeping the file's line endings.
 fn append_repo(text: &str, url: &str) -> anyhow::Result<String> {
-    let crlf = text.contains("\r\n");
-    let text = text.replace("\r\n", "\n");
-    let mut doc: DocumentMut = text.parse()?;
-    let has_settings = doc.iter().any(|(_, item)| item.is_value());
-    let edited = match doc.get_mut("repos") {
-        Some(repos) => {
-            let repos = repos.as_array_mut().context("`repos` is not an array")?;
-            append_formatted(repos, url);
-            doc.to_string()
-        }
-        None if has_settings => {
-            doc.insert("repos", toml_edit::value(Array::from_iter([url])));
-            doc.to_string()
-        }
-        None => insert_first_setting(&text, &format!("repos = {}\n", Array::from_iter([url]))),
-    };
-    Ok(if crlf {
-        edited.replace('\n', "\r\n")
-    } else {
-        edited
+    keeping_line_endings(text, |text| {
+        let mut doc: DocumentMut = text.parse()?;
+        let has_settings = doc.iter().any(|(_, item)| item.is_value());
+        Ok(match doc.get_mut("repos") {
+            Some(repos) => {
+                let repos = repos.as_array_mut().context("`repos` is not an array")?;
+                append_formatted(repos, url);
+                doc.to_string()
+            }
+            None if has_settings => {
+                doc.insert("repos", toml_edit::value(Array::from_iter([url])));
+                doc.to_string()
+            }
+            None => insert_first_setting(text, &format!("repos = {}\n", Array::from_iter([url]))),
+        })
     })
 }
 

@@ -1,5 +1,6 @@
 //! What the scheduler knows, shared with the web UI and `/metrics`.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -129,14 +130,27 @@ impl Overview {
 
     /// Forgets the state of every identity that shares the archive of `id`.
     pub fn forget(&mut self, id: &RepoId) {
-        self.state.repos.retain(|key, _| {
-            RepoId::from_url(key).map_or(true, |other| other.host_and_path() != id.host_and_path())
-        });
+        self.state
+            .repos
+            .retain(|key, _| RepoId::from_url(key).map_or(true, |other| !other.same_archive(id)));
     }
 
     /// Each tracked repo with its state, if it has any yet.
     pub fn tracked_with_state(&self) -> impl Iterator<Item = (&Tracked, Option<&RepoState>)> {
         self.tracked.iter().map(|t| (t, self.repo_state(&t.id)))
+    }
+}
+
+/// Held from taking a copy of the state until it's saved, so an older copy
+/// never overwrites a newer one.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Saves the current state to `path`, logging a failure.
+pub fn save_state(overview: &SharedOverview, path: &Path) {
+    let _lock = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let state = overview.lock().unwrap().state.clone();
+    if let Err(e) = state.save(path) {
+        tracing::error!(error = %format!("{e:#}"), "couldn't save state");
     }
 }
 

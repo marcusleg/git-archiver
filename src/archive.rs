@@ -13,11 +13,12 @@
 //! upstream refusing the repo makes it Unavailable, anything else is a
 //! transient Fetch failed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context, bail};
@@ -34,8 +35,8 @@ const PRESERVED: &str = "refs/preserved/";
 
 pub struct Archives {
     root: PathBuf,
-    /// Held while fetching an archive or deleting one.
-    busy: tokio::sync::Mutex<()>,
+    /// One lock per archive, held while fetching or deleting it.
+    busy: std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Facts read from an archive.
@@ -138,15 +139,22 @@ impl Archives {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             root: data_dir.join("repos"),
-            busy: tokio::sync::Mutex::new(()),
+            busy: std::sync::Mutex::default(),
         }
     }
 
-    /// Waits until no fetch or delete runs, and keeps others waiting until
-    /// the guard is dropped. Hold it from a git operation until its result
-    /// is saved.
-    pub async fn exclusive(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.busy.lock().await
+    /// Waits until no fetch or delete of the repo's archive runs, and keeps
+    /// others waiting until the guard is dropped. Hold it from a git
+    /// operation until its result is saved.
+    pub async fn exclusive(&self, id: &RepoId) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .busy
+            .lock()
+            .unwrap()
+            .entry(id.archive_path())
+            .or_default()
+            .clone();
+        lock.lock_owned().await
     }
 
     /// The `repos/` directory every archive lives under.
@@ -342,9 +350,15 @@ impl Archives {
             let target = doomed.path().join("archive");
             std::fs::rename(&archive, &target)
                 .with_context(|| format!("couldn't delete archive {}", archive.display()))?;
-            doomed
-                .close()
-                .with_context(|| format!("couldn't delete archive {}", archive.display()))?;
+            // Moved out of `repos/`'s archives, it's gone for the app.
+            let leftover = doomed.path().to_owned();
+            if let Err(e) = doomed.close() {
+                tracing::warn!(
+                    path = %leftover.display(),
+                    error = %e,
+                    "couldn't remove a deleted archive's files; delete them by hand",
+                );
+            }
             let mut dir = parent;
             while dir != root && std::fs::remove_dir(dir).is_ok() {
                 dir = dir.parent().expect("inside repos/");
