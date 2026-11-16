@@ -4,6 +4,7 @@
 mod archive;
 pub mod clock;
 mod config;
+mod git_http;
 mod identity;
 mod metrics;
 mod overview;

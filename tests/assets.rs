@@ -41,7 +41,10 @@ async fn the_page_loads_no_resources_from_other_hosts() {
     for resource in &resources {
         assert!(is_same_origin(resource), "page loads {resource}");
     }
-    assert!(!page.contains("<script"), "page has no scripts yet");
+    assert!(
+        !page.contains("<script src"),
+        "scripts are inline, not loaded"
+    );
 
     let css = app.get("/assets/style.css").await;
     assert_eq!(css.status, 200);

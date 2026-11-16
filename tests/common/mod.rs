@@ -199,6 +199,27 @@ impl TestApp {
         Metrics::parse(&page.text())
     }
 
+    /// Sends a GET with the request target exactly as given, unnormalized,
+    /// and returns the status code.
+    pub async fn raw_get_status(&self, target: &str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(self.addr()).await.unwrap();
+        let request = format!(
+            "GET {target} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.addr()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response);
+        let status_line = response.lines().next().expect("a status line");
+        status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("bad status line: {status_line}"))
+    }
+
     pub async fn get(&self, path: &str) -> Page {
         let url = format!("http://{}{}", self.addr(), path);
         let response = reqwest::get(&url).await.expect("request succeeds");
