@@ -126,3 +126,27 @@ async fn a_rejected_repo_url_is_named_without_its_credentials() {
         assert!(!error.contains("secretpw"), "{url:?}: {error}");
     }
 }
+
+#[tokio::test]
+async fn an_invalid_config_names_where_without_ever_quoting_a_token() {
+    let cases = [
+        (
+            "repos = []\n[hosts.\"github.com\"]\ntoken = \"ghp_secret\n",
+            &["line 3"][..],
+        ),
+        (
+            "[hosts]\n\"github.com\" = \"ghp_secret\"\n",
+            &["line 2", "invalid type"][..],
+        ),
+    ];
+    for (config, expected) in cases {
+        let error = TestApp::start_error(config).await;
+        assert!(!error.contains("ghp_secret"), "{error}");
+        for expected in expected {
+            assert!(
+                error.contains(expected),
+                "config {config:?}: expected error to mention {expected:?}, got: {error}"
+            );
+        }
+    }
+}

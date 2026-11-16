@@ -150,6 +150,42 @@ async fn untracking_with_keep_archive_stops_fetching_and_lists_the_archive_as_un
 }
 
 #[tokio::test]
+async fn untracking_a_repo_widens_the_gap_from_the_next_fetch_on() {
+    let forge = FakeForge::start().await;
+    let repos: Vec<Upstream> = ["a/one", "a/two", "a/three"]
+        .iter()
+        .map(|path| {
+            let upstream = forge.create_repo(path);
+            upstream.commit("first");
+            upstream
+        })
+        .collect();
+    let urls: Vec<&str> = repos.iter().map(Upstream::url).collect();
+    let app = TestApp::tracking(&urls).await;
+    let start = app.now();
+    let h = |hours: u64| Some((start + hours * 3600) as f64);
+    let next_fetch = async || {
+        app.metrics()
+            .await
+            .value("archiver_next_fetch_timestamp_seconds", &[])
+    };
+    app.advance_and_settle(8 * HOUR).await;
+    assert_eq!(next_fetch().await, h(16), "24h / 3 after the last attempt");
+
+    let page = untrack(&app, urls[2], "Keep archive").await;
+    assert_eq!(page.status, 200, "{}", page.text());
+    app.advance_and_settle(MINUTE).await;
+
+    assert_eq!(next_fetch().await, h(20), "24h / 2 after the last attempt");
+    app.advance_and_settle(12 * HOUR - MINUTE).await;
+    let two = format!("http://{}/a/two", forge.host());
+    assert_eq!(
+        app.metrics().await.last_success(&two),
+        Some(start + 20 * 3600)
+    );
+}
+
+#[tokio::test]
 async fn untracking_with_delete_archive_erases_the_archive_and_its_state() {
     let (forge, upstream) = forge_with("foo/bar").await;
     let other = "https://example.com/other/repo";
