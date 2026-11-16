@@ -150,7 +150,7 @@ Every archive, tracked or not, can be cloned read-only from the git endpoint und
 git clone http://localhost:8080/git/github.com/owner/repo.git
 ```
 
-A plain clone gets the default branch and tags. To get the preserved refs too, clone with `--mirror`, or fetch them into an existing clone:
+A plain clone gets the default branch and tags. To get the preserved refs too, clone with `--mirror`, or fetch them into an existing clone. When an archive has preserved refs, its card offers the mirror clone command too, under the expanded list of preserved refs:
 
 ```sh
 git clone --mirror http://localhost:8080/git/github.com/owner/repo.git
@@ -162,7 +162,7 @@ Preserved refs are named `refs/preserved/<UTC time of the rewrite>/heads/<branch
 
 The endpoint refuses pushes. Each archive is also an ordinary bare repo in `repos/` in the data directory, so you can inspect or recover it with plain `git` even without the app.
 
-The clone command in the UI uses the host and port your browser reached the app on, always over `http://`. If a reverse proxy serves the app over HTTPS, use `https://` instead.
+The clone commands in the UI use the host and port your browser reached the app on, always over `http://`. If a reverse proxy serves the app over HTTPS, use `https://` instead.
 
 ## Metrics
 
