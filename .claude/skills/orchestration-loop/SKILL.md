@@ -6,9 +6,9 @@ disable-model-invocation: true
 
 # Orchestration loop
 
-You are the **orchestrator**. You never write code for an issue yourself. You find the current spec, keep one **worker** (an interactive Claude session running `/implement`) alive per unblocked issue of it, merge each worker's PR once its checks pass, clean up, and launch the issues each merge unblocks. Once every issue of the spec is closed, you launch a **reviewer** session that runs `mattpocock-skills:code-review` over what the spec changed, then has it file every finding as a follow-up issue with `mattpocock-skills:to-tickets`. Workers take those issues like any other, and once they are closed you review again. You loop until a review finds nothing.
+You are the **orchestrator**. You never write code for an issue yourself. You find the current spec, keep one **worker** (an interactive Claude session running `/mattpocock-skills:implement`) alive per unblocked issue of it, merge each worker's PR once its checks pass, clean up, and launch the issues each merge unblocks. Once every issue of the spec is closed, you launch a **reviewer** session that runs `mattpocock-skills:code-review` over what the spec changed, then has it file every finding as a follow-up issue with `mattpocock-skills:to-tickets`. Workers take those issues like any other, and once they are closed you review again. You loop until a review finds nothing.
 
-Why separate sessions, not subagents: `/implement` and `mattpocock-skills:code-review` spawn subagents, and a subagent cannot spawn its own. Why visible sessions: the user watches the workers and answers their questions.
+Why separate sessions, not subagents: `/mattpocock-skills:implement` and `mattpocock-skills:code-review` spawn subagents, and a subagent cannot spawn its own. Why visible sessions: the user watches the workers and answers their questions.
 
 ## Tools
 
@@ -94,11 +94,11 @@ Done when every frontier issue has a recorded, prompted worker. If every issue o
 
 Fill in the placeholders. The worker starts with no context.
 
-> /implement #<n>
+> /mattpocock-skills:implement #<n>
 >
-> Read the issue with `gh issue view <n> --comments`. You are in a dedicated worktree on branch `issue-<n>-<slug>`, made from `<default-branch>`. Work only on this issue. The subagents that `/implement` starts for review are fine.
+> Read the issue with `gh issue view <n> --comments`. You are in a dedicated worktree on branch `issue-<n>-<slug>`, made from `<default-branch>`. Work only on this issue. The subagents that `/mattpocock-skills:implement` starts for review are fine.
 >
-> Once the work is committed, tests pass and the tree is clean, push the branch and open a PR against `<default-branch>`. Its body must contain `Closes #<n>` and a short summary of what changed and why. Leave the merge to the orchestrator. If it sends you failing checks or a merge conflict, fix the problem, push, and report again. For conflicts, rebase onto `<default-branch>` with `/resolving-merge-conflicts`.
+> Once the work is committed, tests pass and the tree is clean, push the branch and open a PR against `<default-branch>`. Its body must contain `Closes #<n>` and a short summary of what changed and why. Leave the merge to the orchestrator. If it sends you failing checks or a merge conflict, fix the problem, push, and report again. For conflicts, rebase onto `<default-branch>` with `/mattpocock-skills:resolving-merge-conflicts`.
 >
 > If anything is ambiguous, ask the user here. They are watching this session.
 >
