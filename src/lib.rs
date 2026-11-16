@@ -15,7 +15,7 @@ mod web;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Context;
 use tokio::sync::oneshot;
@@ -82,15 +82,10 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         .with_context(|| format!("couldn't listen on {listen}"))?;
     let addr = listener.local_addr()?;
 
-    let overview = Arc::new(Mutex::new(Overview {
-        tracked: overview::tracked(&config.repos),
-        state,
-        ..Overview::default()
-    }));
+    let overview = Overview::new(overview::tracked(&config.repos), state, state_path);
     let archives = Arc::new(Archives::new(&data_dir));
     let tracking = Arc::new(Tracking::new(
         config::file_path(&data_dir),
-        state_path.clone(),
         options.clock.clone(),
         overview.clone(),
         archives.clone(),
@@ -99,13 +94,11 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         Scheduler {
             clock: options.clock.clone(),
             archives: archives.clone(),
-            state_path,
             interval: config.interval,
             started: options.clock.now(),
             overview: overview.clone(),
             tracking: tracking.clone(),
             tokens: config.tokens,
-            config_error: None,
         }
         .run(),
     );

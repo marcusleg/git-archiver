@@ -2,15 +2,13 @@
 //! the oldest last attempt first, one at a time. Repos added in the UI jump
 //! the queue.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::archive::{Archives, FetchError};
 use crate::clock::Clock;
 use crate::config::Tokens;
-use crate::overview::{Overview, SharedOverview, Tracked, save_state};
-use crate::state::Status;
+use crate::overview::{SharedOverview, Tracked};
 use crate::tracking::Tracking;
 
 /// Every fetch is stopped after this long.
@@ -23,7 +21,6 @@ const CONFIG_RECHECK: Duration = Duration::from_secs(60);
 pub struct Scheduler {
     pub clock: Arc<dyn Clock>,
     pub archives: Arc<Archives>,
-    pub state_path: PathBuf,
     pub interval: Duration,
     pub started: SystemTime,
     pub overview: SharedOverview,
@@ -31,8 +28,6 @@ pub struct Scheduler {
     /// From the last good config, so a changed token counts from the next
     /// fetch.
     pub tokens: Tokens,
-    /// The last config error logged, so a broken file is logged once.
-    pub config_error: Option<String>,
 }
 
 impl Scheduler {
@@ -64,53 +59,23 @@ impl Scheduler {
         match self.tracking.reload() {
             Ok(tokens) => {
                 self.tokens = tokens;
-                if self.config_error.take().is_some() {
+                if self.overview.set_config_error(None) {
                     tracing::info!("config is valid again");
-                    self.overview.lock().unwrap().config_error = None;
                 }
             }
             Err(error) => {
-                if self.config_error.as_ref() != Some(&error) {
+                // Logged once per distinct error, so a broken file isn't
+                // logged on every reload.
+                if self.overview.set_config_error(Some(error.clone())) {
                     tracing::error!(error, "keeping the last good config");
-                    self.overview.lock().unwrap().config_error = Some(error.clone());
-                    self.config_error = Some(error);
                 }
             }
         }
     }
 
-    /// When the next fetch is due and which repo it fetches, also recorded
-    /// in the overview. A repo that jumped the queue is due now.
+    /// When the next fetch is due and which repo it fetches.
     fn next_fetch(&self, now: SystemTime) -> Option<(SystemTime, Tracked)> {
-        // One lock for reading the queue and recording the result, so a repo
-        // jumping the queue meanwhile isn't hidden by a stale due time.
-        let mut overview = self.overview.lock().unwrap();
-        let next = Self::next_fetch_in(&overview, self.interval, self.started, now);
-        overview.next_fetch = next.as_ref().map(|(due, _)| *due);
-        next
-    }
-
-    fn next_fetch_in(
-        overview: &Overview,
-        interval: Duration,
-        started: SystemTime,
-        now: SystemTime,
-    ) -> Option<(SystemTime, Tracked)> {
-        if let Some(repo) = Tracking::fetch_first(overview) {
-            return Some((now, repo.clone()));
-        }
-        let count = u32::try_from(overview.tracked.len()).unwrap_or(u32::MAX);
-        if count == 0 {
-            return None;
-        }
-        let gap = interval / count;
-        let last_attempt = |t: &Tracked| overview.repo_state(&t.id).and_then(|s| s.last_attempt);
-        let latest = overview.tracked.iter().filter_map(last_attempt).max();
-        let due = latest.unwrap_or(started) + gap;
-        // Never-attempted repos sort first (`None < Some`); `min_by_key`
-        // keeps the first of equals, so ties go by config order.
-        let repo = overview.tracked.iter().min_by_key(|t| last_attempt(t))?;
-        Some((due, repo.clone()))
+        self.overview.next_fetch(self.interval, self.started, now)
     }
 
     /// Fetches the repo and records the result, unless the repo is untracked
@@ -148,55 +113,8 @@ impl Scheduler {
         let duration = timer.elapsed();
         let size = self.archives.size(&repo.id).await;
 
-        {
-            let mut overview = self.overview.lock().unwrap();
-            overview.last_fetch_duration = Some(duration);
-            let (result, preserved) = match result {
-                Ok(preserved) => (Ok(()), preserved),
-                Err(e) => (Err(e), Vec::new()),
-            };
-            if !preserved.is_empty() {
-                overview.rewrites += 1;
-                tracing::warn!(
-                    repo = %repo.id,
-                    preserved = ?preserved,
-                    "upstream rewrote history; preserved the old tips",
-                );
-            }
-            if let Err(e) = &result {
-                overview.fetch_errors.count(e.status());
-            }
-            let entry = overview.state.repos.entry(repo.id.to_string()).or_default();
-            entry.record_attempt(attempt, size);
-            let change = entry.record_result(attempt, &result);
-            match (&result, change) {
-                (Ok(()), Some(change)) => tracing::info!(
-                    repo = %repo.id,
-                    from = %change.from.map_or("none", Status::as_str),
-                    to = %change.to.as_str(),
-                    "status changed",
-                ),
-                (Err(e), Some(change)) => tracing::warn!(
-                    repo = %repo.id,
-                    from = %change.from.map_or("none", Status::as_str),
-                    to = %change.to.as_str(),
-                    reason = e.reason(),
-                    "status changed",
-                ),
-                (Err(e), None) => tracing::warn!(
-                    repo = %repo.id,
-                    status = %e.status().as_str(),
-                    reason = e.reason(),
-                    "status unchanged",
-                ),
-                (Ok(()), None) => {}
-            }
-            if result.is_ok() {
-                tracing::info!(repo = %repo.id, duration_ms = duration.as_millis(), "fetched");
-            }
-        }
-        self.tracking.fetched(&repo.id);
-        save_state(&self.overview, &self.state_path);
+        self.overview
+            .record_fetch(&repo.id, attempt, duration, size, result);
     }
 }
 
