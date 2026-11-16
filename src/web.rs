@@ -15,14 +15,14 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 use crate::archive::{Archives, Inspection};
 use crate::clock::Clock;
 use crate::metrics;
-use crate::scheduler::{Shared, Tracked};
+use crate::overview::{SharedOverview, Tracked};
 use crate::state::{RepoState, Status};
 
 pub struct AppState {
     pub config_path: PathBuf,
     pub clock: Arc<dyn Clock>,
     pub archives: Arc<Archives>,
-    pub shared: Shared,
+    pub overview: SharedOverview,
 }
 
 const STYLESHEET: &str = include_str!("../assets/style.css");
@@ -54,7 +54,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
-    let body = metrics::render(&state.shared.lock().unwrap());
+    let body = metrics::render(&state.overview.lock().unwrap());
     ([(header::CONTENT_TYPE, metrics::CONTENT_TYPE)], body).into_response()
 }
 
@@ -82,14 +82,10 @@ fn asset(content_type: &'static str, body: &'static [u8]) -> Response {
 
 async fn list_page(State(app): State<Arc<AppState>>) -> Html<String> {
     let tracked: Vec<(Tracked, RepoState)> = {
-        let snapshot = app.shared.lock().unwrap();
-        snapshot
-            .tracked
-            .iter()
-            .map(|t| {
-                let state = snapshot.state.repos.get(t.id.as_str());
-                (t.clone(), state.cloned().unwrap_or_default())
-            })
+        let overview = app.overview.lock().unwrap();
+        overview
+            .tracked_with_state()
+            .map(|(t, state)| (t.clone(), state.cloned().unwrap_or_default()))
             .collect()
     };
     let mut cards = Vec::with_capacity(tracked.len());

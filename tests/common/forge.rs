@@ -2,10 +2,13 @@
 //! running `git http-backend` as a CGI, the way a real git host would answer.
 //! Tests change upstream by pushing to it.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
@@ -21,6 +24,15 @@ pub struct FakeForge {
     dir: TempDir,
     addr: SocketAddr,
     server: JoinHandle<()>,
+    behaviour: Arc<Behaviour>,
+}
+
+/// How the forge answers, shared with its request handler.
+struct Behaviour {
+    served: PathBuf,
+    /// Repo paths whose requests never get an answer.
+    hanging: Mutex<HashSet<String>>,
+    hung_requests: AtomicUsize,
 }
 
 impl Drop for FakeForge {
@@ -36,13 +48,41 @@ impl FakeForge {
         std::fs::create_dir(dir.path().join("work")).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let behaviour = Arc::new(Behaviour {
+            served: dir.path().join("served"),
+            hanging: Mutex::default(),
+            hung_requests: AtomicUsize::new(0),
+        });
         let router = axum::Router::new()
             .fallback(http_backend)
-            .with_state(Arc::new(dir.path().join("served")));
+            .with_state(behaviour.clone());
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        Self { dir, addr, server }
+        Self {
+            dir,
+            addr,
+            server,
+            behaviour,
+        }
+    }
+
+    /// Makes every request for the repo at `path` hang without an answer.
+    pub fn hang(&self, path: &str) {
+        self.behaviour
+            .hanging
+            .lock()
+            .unwrap()
+            .insert(format!("/{path}.git/"));
+    }
+
+    /// Waits (in real time) until a request has hung.
+    pub async fn wait_for_hung_request(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.behaviour.hung_requests.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "no request hung");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// The host part of every repo URL, as it appears in archive paths.
@@ -146,8 +186,18 @@ impl Upstream {
 }
 
 /// Answers one request by running `git http-backend` as a CGI script.
-async fn http_backend(State(root): State<Arc<PathBuf>>, request: Request) -> Response {
+async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
+    let hangs = {
+        let hanging = behaviour.hanging.lock().unwrap();
+        hanging
+            .iter()
+            .any(|prefix| parts.uri.path().starts_with(prefix))
+    };
+    if hangs {
+        behaviour.hung_requests.fetch_add(1, Ordering::SeqCst);
+        std::future::pending::<()>().await;
+    }
     let body = to_bytes(body, usize::MAX).await.unwrap();
 
     let mut command = tokio::process::Command::new("git");
@@ -155,7 +205,7 @@ async fn http_backend(State(root): State<Arc<PathBuf>>, request: Request) -> Res
         .arg("http-backend")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_PROJECT_ROOT", root.as_path())
+        .env("GIT_PROJECT_ROOT", &behaviour.served)
         .env("GIT_HTTP_EXPORT_ALL", "1")
         .env("REQUEST_METHOD", parts.method.as_str())
         .env("PATH_INFO", parts.uri.path())

@@ -33,6 +33,26 @@ pub struct RepoState {
     pub size_bytes: Option<u64>,
 }
 
+impl RepoState {
+    /// Records a fetch attempt, whatever its result, and the archive's size
+    /// after it.
+    pub fn record_attempt(&mut self, at: SystemTime, size_bytes: Option<u64>) {
+        self.last_attempt = Some(at);
+        self.size_bytes = size_bytes;
+    }
+
+    /// Records a successful fetch. Returns whether the status changed.
+    pub fn record_success(&mut self, at: SystemTime) -> bool {
+        self.last_success = Some(at);
+        if self.status == Some(Status::Available) {
+            return false;
+        }
+        self.status = Some(Status::Available);
+        self.status_since = Some(at);
+        true
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
