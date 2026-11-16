@@ -357,7 +357,7 @@ struct CredentialsWarning {
 /// Tracks [`GOOD_REPO`], then writes `bad_config`, which holds the password
 /// `secretpw`. Checks what every such warning shares: a banner shows, the
 /// page and the log never show `secretpw`, and the last good repo list stays.
-async fn credentials_warning(bad_config: &str) -> CredentialsWarning {
+async fn write_config_with_credentials(bad_config: &str) -> CredentialsWarning {
     let logs = common::logs::capture();
     let app = TestApp::tracking(&[GOOD_REPO]).await;
 
@@ -387,7 +387,7 @@ async fn the_config_warning_names_a_hosts_key_with_credentials_without_showing_t
         banner,
         page,
         logged,
-    } = credentials_warning(&format!(
+    } = write_config_with_credentials(&format!(
         "{}\n[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"x\"\n",
         config_tracking(&[GOOD_REPO, "https://example.com/new/repo"]),
     ))
@@ -403,11 +403,12 @@ async fn the_config_warning_names_a_hosts_key_with_credentials_without_showing_t
 
 #[tokio::test]
 async fn the_config_warning_names_a_repo_url_with_credentials_without_showing_them() {
-    let CredentialsWarning { banner, logged, .. } = credentials_warning(&config_tracking(&[
-        GOOD_REPO,
-        "https://user:secretpw@example.com/foo/bar",
-    ]))
-    .await;
+    let CredentialsWarning { banner, logged, .. } =
+        write_config_with_credentials(&config_tracking(&[
+            GOOD_REPO,
+            "https://user:secretpw@example.com/foo/bar",
+        ]))
+        .await;
 
     assert!(
         banner.contains("must not contain credentials"),
