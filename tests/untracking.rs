@@ -463,11 +463,11 @@ async fn the_config_warning_names_an_unknown_field_with_credentials_without_show
             logged.contains(&expected_logged),
             "where and what: {logged}"
         );
-        for shown in ["secret", "se://", "user:"] {
-            assert!(!page.contains(shown), "{table:?} shows {shown:?}: {page}");
+        for leaked in ["secret", "se://", "user:"] {
+            assert!(!page.contains(leaked), "{table:?} shows {leaked:?}: {page}");
             assert!(
-                !logged.contains(shown),
-                "{table:?} shows {shown:?}: {logged}"
+                !logged.contains(leaked),
+                "{table:?} shows {leaked:?}: {logged}"
             );
         }
     }

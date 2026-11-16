@@ -278,10 +278,10 @@ async fn an_unknown_field_is_named_without_its_credentials() {
     for (config, expected) in cases {
         let error = TestApp::start_error(config).await;
         assert!(error.contains(expected), "{config:?}: {error}");
-        for shown in ["secret", "se://", "user:"] {
+        for leaked in ["secret", "se://", "user:"] {
             assert!(
-                !error.contains(shown),
-                "{config:?} shows {shown:?}: {error}"
+                !error.contains(leaked),
+                "{config:?} shows {leaked:?}: {error}"
             );
         }
     }
@@ -298,10 +298,24 @@ async fn an_invalid_config_names_where_without_ever_quoting_a_token() {
             "[hosts]\n\"github.com\" = \"ghp_secret\"\n",
             &["line 2", "invalid type"][..],
         ),
+        // serde writes the value with `\"` escaped, which mustn't end it early.
+        (
+            "[hosts]\n\"github.com\" = \"ghp_\\\"secret`ab`cd\"\n",
+            &["line 2", "invalid type: string \"…\", expected"][..],
+        ),
+        (
+            "repos = \"https://user:ghp_\\\"secret`x`pw@github.com\"\n",
+            &["line 1", "invalid type: string \"…\", expected"][..],
+        ),
     ];
     for (config, expected) in cases {
         let error = TestApp::start_error(config).await;
-        assert!(!error.contains("ghp_secret"), "{error}");
+        for leaked in ["secret", "`ab", "pw@", "user:"] {
+            assert!(
+                !error.contains(leaked),
+                "{config:?} shows {leaked:?}: {error}"
+            );
+        }
         for expected in expected {
             assert!(
                 error.contains(expected),
