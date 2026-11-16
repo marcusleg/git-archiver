@@ -49,6 +49,7 @@
   --accent-cyan: var(--monokai-cyan);
   --accent-green: var(--monokai-green);
   --on-accent: #121310;
+  --overlay: rgba(0, 0, 0, 0.5);
 
   --primary: var(--accent-purple);
   --focus: var(--accent-pink);
@@ -211,7 +212,15 @@ main {
   padding: var(--space-5);
 }
 
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
 .repo-url {
+  min-width: 0;
   margin: 0;
   font-size: 1.125rem;
   font-weight: 700;
@@ -389,6 +398,93 @@ main {
 
 .button.primary:hover {
   background: var(--fg);
+}
+
+.button.secondary {
+  color: var(--fg);
+  background: transparent;
+  border-color: var(--border);
+}
+
+.button.secondary:hover {
+  background: var(--surface-hover);
+}
+
+.button.danger {
+  color: var(--on-accent);
+  background: var(--danger);
+}
+
+.button.small {
+  flex: none;
+  padding: var(--space-1) var(--space-3);
+  font-size: 0.875rem;
+}
+
+/* Untrack confirmation: on `surface` with a border over the `overlay`
+   backdrop, no shadow */
+
+.dialog {
+  width: min(26rem, calc(100% - 2 * var(--space-4)));
+  padding: var(--space-5);
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.dialog::backdrop {
+  background: var(--overlay);
+}
+
+.dialog h2 {
+  margin: 0;
+  font-size: 1.125rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.dialog p {
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
+}
+
+/* Banners above the list: a failed action or an invalid config file */
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  overflow-wrap: anywhere;
+}
+
+.banner > .icon {
+  /* Centred on the first line of a message that wraps. */
+  margin-top: 0.25em;
+  color: var(--accent-orange);
+}
+
+.banner p {
+  margin: 0;
+}
+
+.banner > div {
+  min-width: 0;
+}
+
+.section-note {
+  margin: calc(-1 * var(--space-2)) 0 var(--space-3);
+  font-size: 0.875rem;
+  color: var(--muted);
 }
 
 .form-error {

@@ -297,6 +297,134 @@ pub fn add_repo(
     Ok(())
 }
 
+/// Why a repo couldn't be removed from the config.
+#[derive(Debug)]
+pub enum RemoveError {
+    /// The file doesn't hold a valid config right now. Its own error is for
+    /// the log only.
+    Invalid(anyhow::Error),
+    /// Reading or writing the file failed.
+    Io(anyhow::Error),
+}
+
+/// Removes every `repos` entry that shares the archive of `id`, then calls
+/// `on_read` with the resulting repo list before any other change or reload
+/// can read the file. Returns whether the config listed the repo; if it
+/// didn't, the file is left alone. Like adding, the file is edited in place
+/// and replaced in one step.
+pub fn remove_repo(
+    path: &Path,
+    id: &RepoId,
+    on_read: impl FnOnce(&[String]),
+) -> Result<bool, RemoveError> {
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::fs::canonicalize(path)
+        .with_context(|| format!("couldn't read config {}", path.display()))
+        .map_err(RemoveError::Io)?;
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("couldn't read config {}", path.display()))
+        .map_err(RemoveError::Io)?;
+    let config = parse(&text).map_err(RemoveError::Invalid)?;
+    let same_archive = |repo: &str| {
+        RepoId::from_url(repo).is_ok_and(|other| other.archive_path() == id.archive_path())
+    };
+    let expected: Vec<String> = config
+        .repos
+        .iter()
+        .filter(|repo| !same_archive(repo))
+        .cloned()
+        .collect();
+    if expected.len() == config.repos.len() {
+        on_read(&config.repos);
+        return Ok(false);
+    }
+
+    let edited = remove_entries(&text, same_archive).map_err(RemoveError::Invalid)?;
+    let repos = parse(&edited)
+        .context("the edited config doesn't parse")
+        .map_err(RemoveError::Invalid)?
+        .repos;
+    if repos != expected {
+        return Err(RemoveError::Invalid(anyhow::anyhow!(
+            "the edited config lists {repos:?}, expected {expected:?}"
+        )));
+    }
+    write_atomically(&path, &edited).map_err(RemoveError::Io)?;
+    on_read(&repos);
+    Ok(true)
+}
+
+/// The config text without the `repos` entries `remove` picks, keeping the
+/// file's line endings.
+fn remove_entries(text: &str, remove: impl Fn(&str) -> bool) -> anyhow::Result<String> {
+    let crlf = text.contains("\r\n");
+    let text = text.replace("\r\n", "\n");
+    let mut doc: DocumentMut = text.parse()?;
+    let repos = doc
+        .get_mut("repos")
+        .and_then(|repos| repos.as_array_mut())
+        .context("`repos` is not an array")?;
+    for i in (0..repos.len()).rev() {
+        if repos.get(i).and_then(Value::as_str).is_some_and(&remove) {
+            remove_formatted(repos, i);
+        }
+    }
+    let edited = doc.to_string();
+    Ok(if crlf {
+        edited.replace('\n', "\r\n")
+    } else {
+        edited
+    })
+}
+
+/// Removes the array's entry at `index` the way a person would: an entry on
+/// its own line goes with that line, including a comment after it, while
+/// comment lines above it stay. An entry sharing its line with others goes
+/// alone.
+fn remove_formatted(array: &mut Array, index: usize) {
+    let text_of =
+        |raw: Option<&RawString>| raw.and_then(RawString::as_str).unwrap_or("").to_owned();
+    let is_last = index + 1 == array.len();
+    let removed = array.remove(index);
+    let prefix = text_of(removed.decor().prefix());
+    // What follows the entry (and its comma) up to the next entry or the
+    // closing bracket.
+    let after = if is_last {
+        // Without a trailing comma, the entry's suffix runs up to the
+        // closing bracket too.
+        let suffix = if array.trailing_comma() {
+            String::new()
+        } else {
+            text_of(removed.decor().suffix())
+        };
+        suffix + &text_of(Some(array.trailing()))
+    } else {
+        text_of(array.get(index).and_then(|next| next.decor().prefix()))
+    };
+    let joined = match (prefix.rfind('\n'), after.find('\n')) {
+        // On its own line: keep what comes before that line and after it.
+        (Some(line_start), Some(line_end)) => {
+            format!("{}{}", &prefix[..=line_start], &after[line_end + 1..])
+        }
+        // Sharing its line: the space before it goes too.
+        _ if is_last => after,
+        _ => format!("{prefix}{}", after.trim_start_matches([' ', '\t'])),
+    };
+    if is_last {
+        if array.is_empty() {
+            array.set_trailing_comma(false);
+        }
+        let only_whitespace = joined.trim().is_empty();
+        array.set_trailing(if array.is_empty() && only_whitespace {
+            ""
+        } else {
+            &joined
+        });
+    } else if let Some(next) = array.get_mut(index) {
+        next.decor_mut().set_prefix(joined);
+    }
+}
+
 /// The config's text and contents, if a repo with identity `id` could be
 /// added to it.
 fn read_for_add(path: &Path, id: &RepoId) -> Result<(String, Config), AddError> {

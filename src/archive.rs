@@ -34,6 +34,8 @@ const PRESERVED: &str = "refs/preserved/";
 
 pub struct Archives {
     root: PathBuf,
+    /// Held while fetching an archive or deleting one.
+    busy: tokio::sync::Mutex<()>,
 }
 
 /// Facts read from an archive.
@@ -136,7 +138,15 @@ impl Archives {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             root: data_dir.join("repos"),
+            busy: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Waits until no fetch or delete runs, and keeps others waiting until
+    /// the guard is dropped. Hold it from a git operation until its result
+    /// is saved.
+    pub async fn exclusive(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.busy.lock().await
     }
 
     /// The `repos/` directory every archive lives under.
@@ -295,6 +305,54 @@ impl Archives {
             return Ok(None);
         }
         Ok(Some(list_refs(&archive, &[PRESERVED]).await?))
+    }
+
+    /// Every archive on disk, by `<host>/<path>`, sorted.
+    pub async fn list(&self) -> Vec<String> {
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut found = Vec::new();
+            if let Err(e) = find_archives(&root, "", &mut found)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(error = %e, "couldn't list all archives");
+            }
+            found.sort();
+            found
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// Deletes the archive from disk, if there is one. Moves it aside first,
+    /// so a crash midway never leaves a partial archive behind, then removes
+    /// the directories left empty above it.
+    pub async fn delete(&self, id: &RepoId) -> anyhow::Result<()> {
+        let archive = self.path(id);
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            if !archive.exists() {
+                return Ok(());
+            }
+            let parent = archive.parent().expect("archive path has a parent");
+            let doomed = tempfile::Builder::new()
+                .prefix(".delete-")
+                .tempdir_in(parent)
+                .with_context(|| format!("couldn't create a directory in {}", parent.display()))?;
+            let target = doomed.path().join("archive");
+            std::fs::rename(&archive, &target)
+                .with_context(|| format!("couldn't delete archive {}", archive.display()))?;
+            doomed
+                .close()
+                .with_context(|| format!("couldn't delete archive {}", archive.display()))?;
+            let mut dir = parent;
+            while dir != root && std::fs::remove_dir(dir).is_ok() {
+                dir = dir.parent().expect("inside repos/");
+            }
+            Ok(())
+        })
+        .await
+        .context("couldn't delete the archive")?
     }
 
     /// The archive's size on disk in bytes, if it exists.
@@ -590,6 +648,28 @@ pub(crate) fn command(dir: &Path, args: &[&str]) -> Command {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     command
+}
+
+/// Collects the archives under `dir`, which is `prefix` below `repos/`:
+/// directories named `*.git`. Identities never put one inside another, so
+/// the search stops at each.
+fn find_archives(dir: &Path, prefix: &str, found: &mut Vec<String>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = format!("{prefix}{name}");
+        match path.strip_suffix(".git") {
+            Some(archive) if !prefix.is_empty() => found.push(archive.to_owned()),
+            _ if name.starts_with(".new-") || name.starts_with(".delete-") => {}
+            _ => find_archives(&entry.path(), &format!("{path}/"), found)?,
+        }
+    }
+    Ok(())
 }
 
 fn dir_size(dir: &Path) -> std::io::Result<u64> {
