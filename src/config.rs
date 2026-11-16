@@ -219,7 +219,7 @@ impl ConfigError {
             key: path.as_deref().and_then(shown_key),
             problem: hide_file_text(
                 error.message(),
-                path.as_ref().and_then(|p| p.last().copied()),
+                path.as_deref().and_then(<[_]>::last).copied(),
             ),
         }
     }
@@ -305,13 +305,13 @@ fn shown_key(path: &[&str]) -> Option<String> {
 /// shown as `…`: each double-quoted string, which serde writes with Rust's
 /// escapes, and each backtick-quoted piece other than [`APP_NAMES`] and
 /// [`TOML_TOKENS`]. serde quotes an unknown field in backticks without
-/// escaping it, so `key`, the last key leading to where the error is, is
-/// hidden first if it holds a backtick, which would end it early. Any other
-/// key is hidden or shown like every other piece, so an error on a value
-/// may still quote an app name that is also its key, as in
-/// ``missing field `token` `` for `[hosts."token"]`.
-fn hide_file_text(message: &str, key: Option<&str>) -> String {
-    let message = match key {
+/// escaping it, so `last_key`, the last key leading to where the error is,
+/// is hidden first if it holds a backtick, which would end it early. Any
+/// other key is hidden or shown like every other piece, so an error may
+/// quote an app name that is also its key, as in ``missing field `token` ``
+/// for `[hosts."token"]`.
+fn hide_file_text(message: &str, last_key: Option<&str>) -> String {
+    let message = match last_key {
         Some(key) if key.contains('`') => message.replacen(&format!("`{key}`"), "`…`", 1),
         _ => message.to_owned(),
     };
