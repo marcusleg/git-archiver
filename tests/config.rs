@@ -96,6 +96,21 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
     }
 }
 
+/// Starts the app with `config`, whose credentials hold `user:` and a
+/// password starting `se`, such as `secretpw` or `se://cretpw`, and checks
+/// that the error names the problem with `expected` but shows no part of the
+/// credentials.
+async fn assert_start_error_hides_credentials(config: &str, expected: &str) {
+    let error = TestApp::start_error(config).await;
+    assert!(error.contains(expected), "{config:?}: {error}");
+    for leaked in ["secret", "se://", "user:"] {
+        assert!(
+            !error.contains(leaked),
+            "{config:?} shows {leaked:?}: {error}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_rejected_repo_url_is_named_without_its_credentials() {
     let cases = [
@@ -125,11 +140,7 @@ async fn a_rejected_repo_url_is_named_without_its_credentials() {
         ),
     ];
     for (url, expected) in cases {
-        let error = TestApp::start_error(&format!("repos = [\"{url}\"]")).await;
-        assert!(error.contains(expected), "{url:?}: {error}");
-        assert!(!error.contains("secretpw"), "{url:?}: {error}");
-        assert!(!error.contains("se://"), "{url:?}: {error}");
-        assert!(!error.contains("user:"), "{url:?}: {error}");
+        assert_start_error_hides_credentials(&format!("repos = [\"{url}\"]"), expected).await;
     }
 }
 
@@ -170,11 +181,7 @@ async fn a_rejected_hosts_key_is_named_without_its_credentials() {
         ),
     ];
     for (config, expected) in cases {
-        let error = TestApp::start_error(config).await;
-        assert!(error.contains(expected), "{config:?}: {error}");
-        assert!(!error.contains("secretpw"), "{config:?}: {error}");
-        assert!(!error.contains("se://"), "{config:?}: {error}");
-        assert!(!error.contains("user:"), "{config:?}: {error}");
+        assert_start_error_hides_credentials(config, expected).await;
     }
 }
 
@@ -217,10 +224,7 @@ async fn a_key_is_named_without_its_credentials_whatever_escapes_it_uses() {
         ),
     ];
     for (config, expected) in cases {
-        let error = TestApp::start_error(config).await;
-        assert!(error.contains(expected), "{config:?}: {error}");
-        assert!(!error.contains("secretpw"), "{config:?}: {error}");
-        assert!(!error.contains("user:"), "{config:?}: {error}");
+        assert_start_error_hides_credentials(config, expected).await;
     }
 }
 
@@ -276,14 +280,7 @@ async fn an_unknown_field_is_named_without_its_credentials() {
         ),
     ];
     for (config, expected) in cases {
-        let error = TestApp::start_error(config).await;
-        assert!(error.contains(expected), "{config:?}: {error}");
-        for leaked in ["secret", "se://", "user:"] {
-            assert!(
-                !error.contains(leaked),
-                "{config:?} shows {leaked:?}: {error}"
-            );
-        }
+        assert_start_error_hides_credentials(config, expected).await;
     }
 }
 

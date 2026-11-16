@@ -354,10 +354,11 @@ struct CredentialsWarning {
     logged: String,
 }
 
-/// Tracks [`GOOD_REPO`], then writes `bad_config`, which holds the password
-/// `secretpw`. Checks what every such warning shares: a banner shows, the
-/// page and the log never show `secretpw`, and the last good repo list stays.
-async fn write_config_with_credentials(bad_config: &str) -> CredentialsWarning {
+/// The warning a fresh app tracking [`GOOD_REPO`] gives once `bad_config`,
+/// which holds the password `secretpw`, is written over its config. Checks
+/// what every such warning shares: a banner shows, the page and the log never
+/// show `secretpw`, and the last good repo list stays.
+async fn warning_about_credentials_in(bad_config: &str) -> CredentialsWarning {
     let logs = common::logs::capture();
     let app = TestApp::tracking(&[GOOD_REPO]).await;
 
@@ -387,7 +388,7 @@ async fn the_config_warning_names_a_hosts_key_with_credentials_without_showing_t
         banner,
         page,
         logged,
-    } = write_config_with_credentials(&format!(
+    } = warning_about_credentials_in(&format!(
         "{}\n[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"x\"\n",
         config_tracking(&[GOOD_REPO, "https://example.com/new/repo"]),
     ))
@@ -450,7 +451,7 @@ async fn the_config_warning_names_an_unknown_field_with_credentials_without_show
             banner,
             page,
             logged,
-        } = write_config_with_credentials(&format!(
+        } = warning_about_credentials_in(&format!(
             "{}\n{table}",
             config_tracking(&[GOOD_REPO, "https://example.com/new/repo"]),
         ))
@@ -479,7 +480,7 @@ async fn the_config_warning_names_a_key_with_an_escaped_at_without_showing_its_c
         banner,
         page,
         logged,
-    } = write_config_with_credentials(&format!(
+    } = warning_about_credentials_in(&format!(
         "{}\n[hosts]\n\"https://user:secretpw\\u0040github.com\" = \"ghp_x\"\n",
         config_tracking(&[GOOD_REPO, "https://example.com/new/repo"]),
     ))
@@ -498,7 +499,7 @@ async fn the_config_warning_names_a_key_with_an_escaped_at_without_showing_its_c
 #[tokio::test]
 async fn the_config_warning_names_a_repo_url_with_credentials_without_showing_them() {
     let CredentialsWarning { banner, logged, .. } =
-        write_config_with_credentials(&config_tracking(&[
+        warning_about_credentials_in(&config_tracking(&[
             GOOD_REPO,
             "https://user:secretpw@example.com/foo/bar",
         ]))
