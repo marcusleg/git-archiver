@@ -4,19 +4,32 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::overview::Overview;
+use crate::identity::RepoId;
+use crate::overview::{Overview, Untracked};
 use crate::state::{RepoState, Status};
 
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-/// Renders every metric. `preserved_refs` holds the number of preserved refs
-/// in each tracked repo's archive, by repo identity, for the repos that have
-/// one.
-pub fn render(overview: &Overview, preserved_refs: &BTreeMap<String, usize>) -> String {
+/// Renders every metric. Per-repo metrics cover the tracked repos and the
+/// `untracked` archives. `preserved_refs` holds the number of preserved refs
+/// in each of their archives, by repo identity, for the repos that have one.
+pub fn render(
+    overview: &Overview,
+    untracked: &[Untracked],
+    preserved_refs: &BTreeMap<String, usize>,
+) -> String {
+    // Each repo with whether it's tracked and its state, if it has any.
+    let repos: Vec<(&RepoId, bool, Option<&RepoState>)> = overview
+        .tracked_with_state()
+        .map(|(t, state)| (&t.id, true, state))
+        .chain(untracked.iter().map(|u| (&u.id, false, u.state.as_ref())))
+        .collect();
     let per_repo = |value: fn(&RepoState) -> Option<f64>| {
-        overview
-            .tracked_with_state()
-            .filter_map(move |(t, state)| Some((vec![("repo", t.id.as_str())], value(state?)?)))
+        repos
+            .iter()
+            .filter_map(move |(id, _, state)| {
+                Some((vec![("repo", id.as_str())], value((*state)?)?))
+            })
             .collect::<Vec<_>>()
     };
     let mut out = String::new();
@@ -25,12 +38,12 @@ pub fn render(overview: &Overview, preserved_refs: &BTreeMap<String, usize>) -> 
         "archiver_repo_status",
         "gauge",
         "1 for the repo's current status, 0 for the others.",
-        overview
-            .tracked_with_state()
-            .filter_map(|(t, state)| Some((t, state?.status?)))
-            .flat_map(|(t, current)| {
+        repos
+            .iter()
+            .filter_map(|(id, _, state)| Some((id, state.as_ref()?.status?)))
+            .flat_map(|(id, current)| {
                 Status::ALL.map(|status| {
-                    let labels = vec![("repo", t.id.as_str()), ("status", status.as_str())];
+                    let labels = vec![("repo", id.as_str()), ("status", status.as_str())];
                     (labels, if status == current { 1.0 } else { 0.0 })
                 })
             }),
@@ -54,9 +67,21 @@ pub fn render(overview: &Overview, preserved_refs: &BTreeMap<String, usize>) -> 
         "archiver_repo_preserved_refs",
         "gauge",
         "Preserved refs in the repo's archive: tips kept from before rewrites.",
-        overview.tracked.iter().filter_map(|t| {
-            let count = preserved_refs.get(t.id.as_str())?;
-            Some((vec![("repo", t.id.as_str())], *count as f64))
+        repos.iter().filter_map(|(id, _, _)| {
+            let count = preserved_refs.get(id.as_str())?;
+            Some((vec![("repo", id.as_str())], *count as f64))
+        }),
+    );
+    family(
+        &mut out,
+        "archiver_repo_tracked",
+        "gauge",
+        "1 if the repo is tracked, 0 for an archive kept after untracking.",
+        repos.iter().map(|(id, tracked, _)| {
+            (
+                vec![("repo", id.as_str())],
+                if *tracked { 1.0 } else { 0.0 },
+            )
         }),
     );
     family(

@@ -17,19 +17,22 @@ use tokio::sync::Notify;
 
 use crate::archive::{self, Archives, Inspection};
 use crate::clock::Clock;
-use crate::config::{self, AddError};
+use crate::config::{self, AddError, RemoveError};
 use crate::git_http;
 use crate::identity::RepoId;
 use crate::metrics;
-use crate::overview::{SharedOverview, Tracked};
+use crate::overview::SharedOverview;
 use crate::state::{RepoState, Status};
 
 pub struct AppState {
     pub config_path: PathBuf,
+    pub state_path: PathBuf,
     pub clock: Arc<dyn Clock>,
     pub archives: Arc<Archives>,
     pub overview: SharedOverview,
     pub wake_scheduler: Arc<Notify>,
+    /// Stops a running fetch of a repo untracked here.
+    pub untracked: Arc<Notify>,
 }
 
 /// How long the add form waits for upstream to answer.
@@ -58,6 +61,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_page))
         .route("/repos", post(add_repo))
+        .route("/repos/untrack", post(untrack_repo))
         .route("/metrics", get(metrics))
         .route("/git/{*path}", any(git))
         .route("/assets/style.css", get(stylesheet))
@@ -66,9 +70,17 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
-    let ids: Vec<RepoId> = {
+    let on_disk = state.archives.list().await;
+    let (ids, untracked) = {
         let overview = state.overview.lock().unwrap();
-        overview.tracked.iter().map(|t| t.id.clone()).collect()
+        let untracked = overview.untracked(&on_disk);
+        let ids: Vec<RepoId> = overview
+            .tracked
+            .iter()
+            .map(|t| t.id.clone())
+            .chain(untracked.iter().map(|u| u.id.clone()))
+            .collect();
+        (ids, untracked)
     };
     let mut preserved_refs = BTreeMap::new();
     for id in ids {
@@ -82,7 +94,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
             }
         }
     }
-    let body = metrics::render(&state.overview.lock().unwrap(), &preserved_refs);
+    let body = metrics::render(&state.overview.lock().unwrap(), &untracked, &preserved_refs);
     ([(header::CONTENT_TYPE, metrics::CONTENT_TYPE)], body).into_response()
 }
 
@@ -141,7 +153,7 @@ async fn add_repo(
             };
             (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                render_list(&app, &form, &endpoint_base(&headers, &uri)).await,
+                render_list(&app, &form, None, &endpoint_base(&headers, &uri)).await,
             )
                 .into_response()
         }
@@ -200,31 +212,201 @@ fn add_error(app: &AppState, url: &str, error: AddError) -> String {
     }
 }
 
-async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Html<String> {
-    render_list(&app, &AddForm::default(), &endpoint_base(&headers, &uri)).await
+/// What to do with the archive of a repo being untracked.
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ArchiveChoice {
+    Keep,
+    Delete,
 }
 
-async fn render_list(app: &AppState, form: &AddForm, base: &str) -> Html<String> {
-    let tracked: Vec<(Tracked, RepoState)> = {
+#[derive(Deserialize)]
+struct UntrackRequest {
+    /// The repo's identity.
+    repo: String,
+    archive: ArchiveChoice,
+}
+
+async fn untrack_repo(
+    State(app): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Form(form): Form<UntrackRequest>,
+) -> Response {
+    let Ok(id) = RepoId::from_url(&form.repo) else {
+        return (StatusCode::BAD_REQUEST, "Not a repo identity.").into_response();
+    };
+    match try_untrack(&app, &id, form.archive).await {
+        Ok(()) => Redirect::to("/").into_response(),
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            render_list(
+                &app,
+                &AddForm::default(),
+                Some(&error),
+                &endpoint_base(&headers, &uri),
+            )
+            .await,
+        )
+            .into_response(),
+    }
+}
+
+/// Removes the repo from the config, stops any fetch of it and, if asked,
+/// deletes its archive and state. On failure, says why for the page.
+async fn try_untrack(app: &AppState, id: &RepoId, archive: ArchiveChoice) -> Result<(), String> {
+    // A repo removed from the file by hand still shows as tracked until the
+    // scheduler re-reads it; the person saw it tracked, so it counts.
+    let shown_tracked = app.overview.lock().unwrap().is_tracked(id);
+    let removed = config::remove_repo(&app.config_path, id, |repos| {
+        app.overview.lock().unwrap().set_tracked(repos);
+    })
+    .map_err(|e| remove_error(app, e))?;
+    if !removed && !shown_tracked {
+        // Already untracked, e.g. a form sent twice. Deleting an untracked
+        // archive isn't offered.
+        return Ok(());
+    }
+    tracing::info!(repo = %id, "untracked");
+    app.untracked.notify_waiters();
+    app.wake_scheduler.notify_one();
+    if archive == ArchiveChoice::Keep {
+        return Ok(());
+    }
+
+    let _exclusive = app.archives.exclusive().await;
+    app.archives.delete(id).await.map_err(|e| {
+        tracing::error!(repo = %id, error = %format!("{e:#}"), "couldn't delete archive");
+        format!(
+            "Untracked “{}”, but couldn’t delete its archive: {}. \
+             Check that the app may write to {} and delete it by hand.",
+            id.host_and_path(),
+            e.root_cause(),
+            app.archives.path(id).display()
+        )
+    })?;
+    let state = {
+        let mut overview = app.overview.lock().unwrap();
+        overview.forget(id);
+        overview.state.clone()
+    };
+    if let Err(e) = state.save(&app.state_path) {
+        tracing::error!(error = %format!("{e:#}"), "couldn't save state");
+    }
+    tracing::info!(repo = %id, "deleted archive");
+    Ok(())
+}
+
+fn remove_error(app: &AppState, error: RemoveError) -> String {
+    let (RemoveError::Invalid(e) | RemoveError::Io(e)) = &error;
+    tracing::error!(error = %format!("{e:#}"), "couldn't remove a repo from the config");
+    match error {
+        RemoveError::Invalid(_) => format!(
+            "Couldn’t untrack the repo: the config file is invalid. Fix {} and try again.",
+            app.config_path.display()
+        ),
+        RemoveError::Io(e) => format!(
+            "Couldn’t untrack the repo: {} can’t be read or written ({}). \
+             Check that the app may write to it and try again.",
+            app.config_path.display(),
+            e.root_cause()
+        ),
+    }
+}
+
+async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Html<String> {
+    render_list(
+        &app,
+        &AddForm::default(),
+        None,
+        &endpoint_base(&headers, &uri),
+    )
+    .await
+}
+
+/// A card's contents: one archive, tracked or not.
+struct CardView {
+    /// The URL as configured for a tracked repo, the identity otherwise.
+    title: String,
+    id: RepoId,
+    state: RepoState,
+    inspection: Inspection,
+    archived: bool,
+}
+
+async fn card_view(app: &AppState, title: String, id: RepoId, state: RepoState) -> CardView {
+    let inspection = app.archives.inspect(&id).await.unwrap_or_else(|e| {
+        tracing::warn!(repo = %id, error = %format!("{e:#}"), "couldn't read archive");
+        Inspection::default()
+    });
+    let archived = app.archives.exists(&id);
+    CardView {
+        title,
+        id,
+        state,
+        inspection,
+        archived,
+    }
+}
+
+/// The list page. `problem` says why the last action failed.
+async fn render_list(
+    app: &AppState,
+    form: &AddForm,
+    problem: Option<&str>,
+    base: &str,
+) -> Html<String> {
+    let on_disk = app.archives.list().await;
+    let (tracked, untracked, config_error) = {
         let overview = app.overview.lock().unwrap();
-        overview
+        let tracked: Vec<_> = overview
             .tracked_with_state()
-            .map(|(t, state)| (t.clone(), state.cloned().unwrap_or_default()))
-            .collect()
+            .map(|(t, state)| {
+                (
+                    t.url.clone(),
+                    t.id.clone(),
+                    state.cloned().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let untracked: Vec<_> = overview
+            .untracked(&on_disk)
+            .into_iter()
+            .map(|u| (u.id.to_string(), u.id, u.state.unwrap_or_default()))
+            .collect();
+        (tracked, untracked, overview.config_error.clone())
     };
     let mut cards = Vec::with_capacity(tracked.len());
-    for (repo, state) in tracked {
-        let inspection = app.archives.inspect(&repo.id).await.unwrap_or_else(|e| {
-            tracing::warn!(repo = %repo.id, error = %format!("{e:#}"), "couldn't read archive");
-            Inspection::default()
-        });
-        let archived = app.archives.exists(&repo.id);
-        cards.push((repo, state, inspection, archived));
+    for (title, id, state) in tracked {
+        cards.push(card_view(app, title, id, state).await);
+    }
+    let mut untracked_cards = Vec::with_capacity(untracked.len());
+    for (title, id, state) in untracked {
+        untracked_cards.push(card_view(app, title, id, state).await);
     }
     let now = app.clock.now();
 
     Html(
         layout(html! {
+            @if let Some(problem) = problem {
+                div .card.banner role="alert" {
+                    (icon_circle_alert())
+                    p { (problem) }
+                }
+            }
+            @if let Some(error) = &config_error {
+                div .card.banner role="status" {
+                    (icon_circle_alert())
+                    div {
+                        p {
+                            code { (app.config_path.display()) }
+                            " is invalid, so the app keeps using the last good config. \
+                             Fix the file and the app picks it up within a minute."
+                        }
+                        pre .reason { (error) }
+                    }
+                }
+            }
             (add_form(form))
             @if cards.is_empty() {
                 section .card.empty {
@@ -242,10 +424,23 @@ async fn render_list(app: &AppState, form: &AddForm, base: &str) -> Html<String>
                         "Tracked repos " span .count { (cards.len()) }
                     }
                     ul .repos {
-                        @for (repo, state, inspection, archived) in &cards {
-                            li {
-                                (repo_card(repo, state, inspection, archived.then_some(base), now))
-                            }
+                        @for (i, card) in cards.iter().enumerate() {
+                            li { (repo_card(card, Some(i), base, now)) }
+                        }
+                    }
+                }
+            }
+            @if !untracked_cards.is_empty() {
+                section aria-labelledby="untracked-heading" {
+                    h2 #untracked-heading .section-label {
+                        "Untracked archives " span .count { (untracked_cards.len()) }
+                    }
+                    p .section-note {
+                        "No longer fetched. Add a repo again to continue its archive."
+                    }
+                    ul .repos {
+                        @for card in &untracked_cards {
+                            li { (repo_card(card, None, base, now)) }
                         }
                     }
                 }
@@ -253,6 +448,35 @@ async fn render_list(app: &AppState, form: &AddForm, base: &str) -> Html<String>
         })
         .into_string(),
     )
+}
+
+/// The untrack button and its confirmation dialog, number `n` on the page.
+fn untrack_dialog(id: &RepoId, n: usize) -> Markup {
+    let dialog = format!("untrack-{n}");
+    html! {
+        button .button.secondary.small type="button" data-dialog=(dialog)
+            aria-haspopup="dialog" { "Untrack" }
+        dialog #(dialog) .dialog aria-labelledby={ (dialog) "-title" }
+            aria-describedby={ (dialog) "-body" } {
+            form method="post" action="/repos/untrack" {
+                input type="hidden" name="repo" value=(id);
+                h2 #{ (dialog) "-title" } { "Untrack “" (id.host_and_path()) "”?" }
+                p #{ (dialog) "-body" } {
+                    "The app stops fetching it. You can keep the archive or delete it \
+                     from disk; deleting can’t be undone."
+                }
+                div .dialog-actions {
+                    button .button.secondary type="submit" formmethod="dialog" { "Cancel" }
+                    button .button.secondary type="submit" name="archive" value="keep" {
+                        "Keep archive"
+                    }
+                    button .button.danger type="submit" name="archive" value="delete" {
+                        "Delete archive"
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn add_form(form: &AddForm) -> Markup {
@@ -281,19 +505,27 @@ fn add_form(form: &AddForm) -> Markup {
     }
 }
 
-fn repo_card(
-    repo: &Tracked,
-    state: &RepoState,
-    inspection: &Inspection,
-    // Where the git endpoint is, if the repo has an archive to clone yet.
-    endpoint_base: Option<&str>,
-    now: SystemTime,
-) -> Markup {
-    let clone = endpoint_base.map(|base| git_http::clone_command(base, &repo.id));
+/// A repo's card. A tracked repo's card is number `untrack` on the page and
+/// can be untracked; an untracked archive's card is read-only.
+fn repo_card(card: &CardView, untrack: Option<usize>, base: &str, now: SystemTime) -> Markup {
+    let CardView {
+        title,
+        id,
+        state,
+        inspection,
+        archived,
+    } = card;
+    // Only an archive on disk can be cloned.
+    let clone = archived.then(|| git_http::clone_command(base, id));
     let fetched = state.status == Some(Status::Available);
     html! {
         article .card {
-            h3 .repo-url { (repo.url) }
+            div .card-head {
+                h3 .repo-url { (title) }
+                @if let Some(n) = untrack {
+                    (untrack_dialog(id, n))
+                }
+            }
             @match (state.status, state.last_success) {
                 (Some(Status::Available), Some(success)) => p .status.available {
                     (icon_circle_check())
@@ -505,18 +737,21 @@ fn layout(content: Markup) -> Markup {
                     a .brand href="/" { "Git Archiver" }
                 }
                 main { (content) }
-                script { (PreEscaped(COPY_SCRIPT)) }
+                script { (PreEscaped(SCRIPT)) }
             }
         }
     }
 }
 
-/// Copies a `data-copy` button's text. The clipboard API needs a secure
-/// context, which a plain-HTTP server on another host isn't, so it falls
-/// back to selecting the text and copying the selection, as it does when the
-/// browser denies clipboard access.
-const COPY_SCRIPT: &str = r#"
+/// Opens the dialog a `data-dialog` button names, and copies a `data-copy`
+/// button's text. The clipboard API needs a secure context, which a
+/// plain-HTTP server on another host isn't, so copying falls back to
+/// selecting the text and copying the selection, as it does when the browser
+/// denies clipboard access.
+const SCRIPT: &str = r#"
 document.addEventListener("click", (event) => {
+  const opener = event.target.closest("[data-dialog]");
+  if (opener) document.getElementById(opener.dataset.dialog).showModal();
   const button = event.target.closest("[data-copy]");
   if (!button) return;
   const copied = () => {

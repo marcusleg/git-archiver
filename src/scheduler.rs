@@ -11,7 +11,8 @@ use tokio::sync::Notify;
 use crate::archive::{Archives, FetchError};
 use crate::clock::Clock;
 use crate::config::{self, Tokens};
-use crate::overview::{Overview, SharedOverview, Tracked, tracked};
+use crate::identity::RepoId;
+use crate::overview::{Overview, SharedOverview, Tracked};
 use crate::state::Status;
 
 /// Every fetch is stopped after this long.
@@ -34,6 +35,8 @@ pub struct Scheduler {
     /// From the last good config, so a changed token counts from the next
     /// fetch.
     pub tokens: Tokens,
+    /// Notified after a repo was untracked in the UI, to stop its fetch.
+    pub untracked: Arc<Notify>,
     /// The last config error logged, so a broken file is logged once.
     pub config_error: Option<String>,
 }
@@ -61,29 +64,27 @@ impl Scheduler {
     }
 
     /// Re-reads the repo list and tokens. An unreadable or invalid config
-    /// keeps the last good ones. Queued repos no longer tracked leave the queue.
+    /// keeps the last good ones, and the problem shows on the list page until
+    /// the file is valid again. Queued repos no longer tracked leave the queue.
     fn reload_tracked(&mut self) {
         let overview = &self.overview;
         let result = config::load_locked(&self.config_path, |config| {
             let config = config.map_err(|e| format!("{e:#}"))?;
-            let mut overview = overview.lock().unwrap();
-            overview.tracked = tracked(&config.repos);
-            let Overview {
-                tracked,
-                fetch_first,
-                ..
-            } = &mut *overview;
-            fetch_first.retain(|id| tracked.iter().any(|t| t.id == *id));
+            overview.lock().unwrap().set_tracked(&config.repos);
             Ok(config.tokens)
         });
         match result {
             Ok(tokens) => {
                 self.tokens = tokens;
-                self.config_error = None;
+                if self.config_error.take().is_some() {
+                    tracing::info!("config is valid again");
+                    self.overview.lock().unwrap().config_error = None;
+                }
             }
             Err(error) => {
                 if self.config_error.as_ref() != Some(&error) {
                     tracing::error!(error, "keeping the last good config");
+                    self.overview.lock().unwrap().config_error = Some(error.clone());
                     self.config_error = Some(error);
                 }
             }
@@ -128,13 +129,40 @@ impl Scheduler {
         Some((due, repo.clone()))
     }
 
+    /// Resolves once the repo isn't tracked any more.
+    async fn until_untracked(&self, id: &RepoId) {
+        loop {
+            // Registered before checking, so an untrack right after the
+            // check still wakes it.
+            let notified = self.untracked.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if !self.overview.lock().unwrap().is_tracked(id) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Fetches the repo and records the result, unless the repo is untracked
+    /// before the fetch finishes.
     async fn fetch(&self, repo: Tracked) {
+        // Held until the state is saved, so deleting an archive never
+        // interleaves with fetching it.
+        let _exclusive = self.archives.exclusive().await;
         let attempt = whole_seconds(self.clock.now());
         let timer = Instant::now();
-        tracing::info!(repo = %repo.id, "fetching");
         let token = self.tokens.for_repo(&repo.id);
         let result = tokio::select! {
-            result = self.archives.fetch(&repo.id, &repo.url, attempt, token) => result,
+            biased;
+            () = self.until_untracked(&repo.id) => {
+                tracing::info!(repo = %repo.id, "not fetching: no longer tracked");
+                return;
+            }
+            result = async {
+                tracing::info!(repo = %repo.id, "fetching");
+                self.archives.fetch(&repo.id, &repo.url, attempt, token).await
+            } => result,
             () = self.clock.sleep_until(attempt + FETCH_TIMEOUT) => Err(FetchError::Failed {
                 reason: format!(
                     "fetch timed out after {}",
