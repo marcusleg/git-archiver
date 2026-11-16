@@ -1,6 +1,7 @@
 mod common;
 
 use common::forge::FakeForge;
+use common::git::refs;
 use common::{HOUR, TestApp};
 use scraper::{Html, Selector};
 
@@ -86,6 +87,12 @@ async fn repo_urls_are_escaped_in_the_page() {
 
     let body = app.get("/").await.text();
     assert!(!body.contains("<b>"), "{body}");
+}
+
+/// The first element under `element` matching `selector`.
+fn first<'a>(element: &scraper::ElementRef<'a>, selector: &str) -> scraper::ElementRef<'a> {
+    let selector = Selector::parse(selector).unwrap();
+    element.select(&selector).next().unwrap()
 }
 
 /// The `<dd>` text for each `<dt>` in a card.
@@ -190,9 +197,8 @@ async fn a_card_shows_its_preserved_ref_count_and_expands_to_their_names_and_sha
     upstream.tag("v1");
     let app = TestApp::tracking(&[upstream.url()]).await;
     app.advance_and_settle(24 * HOUR).await;
-    let old_tag =
-        common::git::refs(&app.archive(&format!("{}/foo/bar", forge.host())))["refs/tags/v1"]
-            .clone();
+    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    let old_tag = refs(&archive)["refs/tags/v1"].clone();
 
     let html = Html::parse_document(&app.get("/").await.text());
     let preserved = &select(&html, "main article .preserved")[0];
@@ -207,37 +213,22 @@ async fn a_card_shows_its_preserved_ref_count_and_expands_to_their_names_and_sha
     let summary = &select(&html, "main article details.preserved summary")[0];
     assert_eq!(text(summary), "2 preserved refs");
     let items = select(&html, "main article details.preserved li");
-    let listed: Vec<(String, String, String)> = items
+    let names: Vec<String> = items
         .iter()
-        .map(|item| {
-            let name = item
-                .select(&Selector::parse("code.ref").unwrap())
-                .next()
-                .unwrap();
-            let sha = item
-                .select(&Selector::parse("code.sha").unwrap())
-                .next()
-                .unwrap();
-            let full = sha.value().attr("title").unwrap().to_owned();
-            assert!(full.starts_with(&text(&sha)), "{}", sha.html());
-            (text(&name), text(&sha).len().to_string(), full)
-        })
+        .map(|item| text(&first(item, "code.ref")))
         .collect();
     assert_eq!(
-        listed,
+        names,
         [
-            (
-                "refs/preserved/20261118T120000Z/heads/main".to_owned(),
-                "12".to_owned(),
-                old_tip,
-            ),
-            (
-                "refs/preserved/20261118T120000Z/tags/v1".to_owned(),
-                "12".to_owned(),
-                old_tag,
-            ),
+            "refs/preserved/20261118T120000Z/heads/main",
+            "refs/preserved/20261118T120000Z/tags/v1",
         ]
     );
+    for (item, full) in items.iter().zip([&old_tip, &old_tag]) {
+        let sha = first(item, "code.sha");
+        assert_eq!(sha.value().attr("title"), Some(full.as_str()));
+        assert_eq!(text(&sha), full[..12]);
+    }
 }
 
 #[tokio::test]
