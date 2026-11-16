@@ -1,0 +1,3 @@
+# Keep pre-rewrite history as preserved refs inside each archive's bare repo
+
+Each archive is a single bare git repository. When a fetch detects a rewrite (the default branch no longer descends from the archived tip, a tag moved or vanished, or the default branch changed), the old tip is kept under `refs/preserved/<timestamp>/…` in that same repository rather than as a copy of the whole archive. Git stores shared objects once, so keeping every rewrite forever costs little, and the archive stays inspectable and cloneable with ordinary git, preserved refs included. This is the on-disk format: changing it later means migrating every existing archive.
