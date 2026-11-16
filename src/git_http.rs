@@ -20,6 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::io::ReaderStream;
 
 use crate::archive;
+use crate::identity::RepoId;
 
 /// Where the endpoint lives in the app's URL space.
 pub const PREFIX: &str = "/git/";
@@ -33,6 +34,12 @@ const MAX_REQUEST_BODY: usize = 64 * 1024 * 1024;
 /// pushing so that git refuses them with its own message. Dumb HTTP isn't
 /// served.
 const SERVICES: &[&str] = &["git-upload-pack", "git-receive-pack"];
+
+/// The command that clones a repo's archive from the endpoint, for a server
+/// reached at `base` (`http://<host>[:<port>]`).
+pub fn clone_command(base: &str, id: &RepoId) -> String {
+    format!("git clone {base}{PREFIX}{}.git", id.host_and_path())
+}
 
 /// Answers a request under `/git/` from the archives in `repos`.
 pub async fn serve(repos: &Path, request: Request) -> Response {
@@ -50,9 +57,10 @@ pub async fn serve(repos: &Path, request: Request) -> Response {
     }
 }
 
-/// A request that names an existing archive and a smart HTTP service.
+/// A request that names an existing archive and a smart HTTP service, as
+/// `git http-backend` takes it.
 #[derive(Debug)]
-struct Target {
+struct BackendRequest {
     /// The canonical `repos/` directory.
     root: PathBuf,
     /// `/<host>/<path>.git/<service path>`, relative to `root`.
@@ -61,8 +69,9 @@ struct Target {
 
 /// Maps a request path to an archive inside `repos`, or `None` (a 404) when
 /// it names anything else. The path stays percent-encoded, as the archive
-/// directories' names are; any encoded separator or dot segment is refused.
-fn resolve(repos: &Path, path: &str, query: &str) -> Option<Target> {
+/// directories' names are, so an encoded `/` is part of a name, never a
+/// separator. Dot segments are refused, encoded or not.
+fn resolve(repos: &Path, path: &str, query: &str) -> Option<BackendRequest> {
     let segments: Vec<&str> = path.strip_prefix(PREFIX)?.split('/').collect();
     if !segments.iter().all(|s| is_plain_segment(s)) {
         return None;
@@ -93,20 +102,17 @@ fn resolve(repos: &Path, path: &str, query: &str) -> Option<Target> {
     if dir != root.join(&archive) || !is_bare_repo(&dir) {
         return None;
     }
-    Some(Target {
+    Some(BackendRequest {
         root,
         path_info: format!("/{archive}/{service}"),
     })
 }
 
-/// A path segment that is neither empty nor a dot segment, and doesn't hide
-/// a separator or a dot segment behind percent-encoding.
+/// A path segment that is neither empty nor a dot segment, even one
+/// written with percent-encoded dots.
 fn is_plain_segment(segment: &str) -> bool {
-    let lower = segment.to_ascii_lowercase();
-    let decoded_dots = lower.replace("%2e", ".");
+    let decoded_dots = segment.to_ascii_lowercase().replace("%2e", ".");
     !matches!(decoded_dots.as_str(), "" | "." | "..")
-        && !segment.contains('\\')
-        && !["%2f", "%5c", "%00"].iter().any(|e| lower.contains(e))
 }
 
 fn is_bare_repo(dir: &Path) -> bool {
@@ -114,20 +120,25 @@ fn is_bare_repo(dir: &Path) -> bool {
 }
 
 /// Runs `git http-backend` for one request and streams its answer back.
-async fn run_backend(target: Target, request: Request) -> anyhow::Result<Response> {
+async fn run_backend(target: BackendRequest, request: Request) -> anyhow::Result<Response> {
     let (parts, body) = request.into_parts();
     let body = match to_bytes(body, MAX_REQUEST_BODY).await {
         Ok(body) => body,
         Err(_) => return Ok(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
     };
 
+    // A hidden ref matches by whole path components, so no trailing slash.
+    let hide_staging = format!(
+        "transfer.hideRefs={}",
+        archive::STAGING.trim_end_matches('/')
+    );
     let mut command = archive::command(
         &target.root,
         &[
             "-c",
             "http.receivepack=false",
             "-c",
-            "transfer.hideRefs=refs/staging",
+            &hide_staging,
             "http-backend",
         ],
     );

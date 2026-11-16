@@ -146,12 +146,13 @@ async fn unknown_repos_traversal_and_non_archive_directories_get_a_404() {
 }
 
 #[tokio::test]
-async fn each_card_shows_a_clone_line_that_works_as_a_clone_command() {
+async fn each_archived_repos_card_shows_a_clone_line_that_works_as_a_clone_command() {
     let forge = FakeForge::start().await;
     let upstream = forge.create_repo("foo/bar");
     let tip = upstream.commit("first");
     let app = TestApp::tracking(&[upstream.url(), "https://github.com/a/b"]).await;
     app.advance_and_settle(12 * HOUR).await;
+    assert!(!app.archive("github.com/a/b").exists());
 
     let html = Html::parse_document(&app.get("/").await.text());
     let lines: Vec<String> = html
@@ -161,10 +162,8 @@ async fn each_card_shows_a_clone_line_that_works_as_a_clone_command() {
 
     assert_eq!(
         lines,
-        [
-            format!("git clone {}", endpoint(&app, &forge, "foo/bar")),
-            format!("git clone http://{}/git/github.com/a/b.git", app.addr()),
-        ]
+        [format!("git clone {}", endpoint(&app, &forge, "foo/bar"))],
+        "only the repo with an archive has a clone line"
     );
     let out = TempDir::new().unwrap();
     let args: Vec<&str> = lines[0].split_whitespace().skip(1).collect();

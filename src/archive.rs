@@ -24,7 +24,8 @@ use tokio::process::Command;
 use crate::identity::RepoId;
 use crate::state::Status;
 
-const STAGING: &str = "refs/staging/";
+/// Where a fetch stages upstream's refs. Never meant for clients.
+pub(crate) const STAGING: &str = "refs/staging/";
 
 pub struct Archives {
     root: PathBuf,
@@ -224,6 +225,11 @@ impl Archives {
             default_branch: head.strip_prefix("refs/heads/").map(str::to_owned),
             tip: Some(tip),
         })
+    }
+
+    /// Whether the repo has an archive on disk yet.
+    pub fn exists(&self, id: &RepoId) -> bool {
+        self.path(id).exists()
     }
 
     /// The archive's size on disk in bytes, if it exists.

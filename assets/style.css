@@ -322,7 +322,7 @@ main {
 
 .icon-button.copied .icon-check {
   display: block;
-  color: var(--accent-green);
+  color: var(--fg);
 }
 
 /* Empty state */
