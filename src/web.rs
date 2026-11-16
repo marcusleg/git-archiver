@@ -519,6 +519,10 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
     // Only an archive on disk can be cloned.
     let clone = archived.then(|| git_http::clone_command(base, id));
     let fetched = state.status == Some(Status::Available);
+    let failed = matches!(
+        state.status,
+        Some(Status::Unavailable | Status::FetchFailed)
+    );
     html! {
         article .card {
             div .card-head {
@@ -566,6 +570,18 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
                         @match state.last_attempt {
                             Some(attempt) => (time(attempt, now)),
                             None => "Never",
+                        }
+                    }
+                }
+                // An Available card's status line already says when.
+                @if failed {
+                    div {
+                        dt { "Last success" }
+                        dd {
+                            @match state.last_success {
+                                Some(success) => (time(success, now)),
+                                None => "Never",
+                            }
                         }
                     }
                 }
