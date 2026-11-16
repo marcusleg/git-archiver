@@ -181,3 +181,69 @@ async fn a_repo_not_fetched_yet_says_so() {
     );
     assert_eq!(field(card, "Last attempt"), "Never");
 }
+
+#[tokio::test]
+async fn a_card_shows_its_preserved_ref_count_and_expands_to_their_names_and_shas() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/bar");
+    let old_tip = upstream.commit("first");
+    upstream.tag("v1");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    let old_tag =
+        common::git::refs(&app.archive(&format!("{}/foo/bar", forge.host())))["refs/tags/v1"]
+            .clone();
+
+    let html = Html::parse_document(&app.get("/").await.text());
+    let preserved = &select(&html, "main article .preserved")[0];
+    assert_eq!(text(preserved), "0 preserved refs");
+    assert!(select(&html, "main article details").is_empty());
+
+    upstream.force_push_new_history("rewritten");
+    upstream.move_tag("v1");
+    app.advance_and_settle(24 * HOUR).await;
+
+    let html = Html::parse_document(&app.get("/").await.text());
+    let summary = &select(&html, "main article details.preserved summary")[0];
+    assert_eq!(text(summary), "2 preserved refs");
+    let items = select(&html, "main article details.preserved li");
+    let listed: Vec<(String, String, String)> = items
+        .iter()
+        .map(|item| {
+            let name = item
+                .select(&Selector::parse("code.ref").unwrap())
+                .next()
+                .unwrap();
+            let sha = item
+                .select(&Selector::parse("code.sha").unwrap())
+                .next()
+                .unwrap();
+            let full = sha.value().attr("title").unwrap().to_owned();
+            assert!(full.starts_with(&text(&sha)), "{}", sha.html());
+            (text(&name), text(&sha).len().to_string(), full)
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (
+                "refs/preserved/20261118T120000Z/heads/main".to_owned(),
+                "12".to_owned(),
+                old_tip,
+            ),
+            (
+                "refs/preserved/20261118T120000Z/tags/v1".to_owned(),
+                "12".to_owned(),
+                old_tag,
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_repo_not_fetched_yet_shows_no_preserved_refs_row() {
+    let app = TestApp::tracking(&["https://github.com/foo/bar"]).await;
+
+    let html = Html::parse_document(&app.get("/").await.text());
+    assert!(select(&html, "main article .preserved").is_empty());
+}

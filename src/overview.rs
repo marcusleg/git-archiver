@@ -20,6 +20,8 @@ pub struct Overview {
     /// Repos to fetch before any scheduled fetch, in order: repos added in
     /// the UI that wait for their clone.
     pub fetch_first: Vec<RepoId>,
+    /// Fetches that found a rewrite since the app started.
+    pub rewrites: u64,
 }
 
 #[derive(Debug, Default)]

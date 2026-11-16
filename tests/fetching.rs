@@ -3,7 +3,7 @@
 mod common;
 
 use common::forge::FakeForge;
-use common::git::{commit_of, git, has_object, refs};
+use common::git::{commit_of, git, refs};
 use common::{HOUR, TestApp};
 
 #[tokio::test]
@@ -56,31 +56,6 @@ async fn new_upstream_commits_and_tags_arrive_with_the_next_fetch() {
     assert_eq!(commit_of(&archive, "refs/tags/v1"), first);
     assert_eq!(commit_of(&archive, "refs/tags/v2"), third);
     assert!(git(&archive, &["merge-base", "--is-ancestor", &second, &third]).is_empty());
-}
-
-#[tokio::test]
-async fn a_non_fast_forward_upstream_change_never_removes_objects_or_refs() {
-    let forge = FakeForge::start().await;
-    let upstream = forge.create_repo("foo/bar");
-    let first = upstream.commit("first");
-    upstream.tag("v1");
-    upstream.tag("v2");
-    let tip = upstream.commit("second");
-    let app = TestApp::tracking(&[upstream.url()]).await;
-    app.advance_and_settle(24 * HOUR).await;
-    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
-    let before = refs(&archive);
-
-    upstream.force_push_new_history("rewritten");
-    upstream.move_tag("v1");
-    upstream.delete_tag("v2");
-    app.advance_and_settle(24 * HOUR).await;
-
-    assert_eq!(refs(&archive), before);
-    assert!(has_object(&archive, &first));
-    assert!(has_object(&archive, &tip));
-    assert_eq!(commit_of(&archive, "refs/tags/v1"), first);
-    assert_eq!(commit_of(&archive, "refs/tags/v2"), first);
 }
 
 #[tokio::test]

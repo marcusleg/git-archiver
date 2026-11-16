@@ -1,6 +1,7 @@
 //! The web UI: server-rendered HTML, with the stylesheet and fonts embedded in
 //! the binary so the page loads nothing from other hosts.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -18,6 +19,7 @@ use crate::archive::{self, Archives, Inspection};
 use crate::clock::Clock;
 use crate::config::{self, AddError};
 use crate::git_http;
+use crate::identity::RepoId;
 use crate::metrics;
 use crate::overview::{SharedOverview, Tracked};
 use crate::state::{RepoState, Status};
@@ -64,7 +66,23 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
-    let body = metrics::render(&state.overview.lock().unwrap());
+    let ids: Vec<RepoId> = {
+        let overview = state.overview.lock().unwrap();
+        overview.tracked.iter().map(|t| t.id.clone()).collect()
+    };
+    let mut preserved_refs = BTreeMap::new();
+    for id in ids {
+        match state.archives.preserved(&id).await {
+            Ok(Some(refs)) => {
+                preserved_refs.insert(id.to_string(), refs.len());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(repo = %id, error = %format!("{e:#}"), "couldn't read archive")
+            }
+        }
+    }
+    let body = metrics::render(&state.overview.lock().unwrap(), &preserved_refs);
     ([(header::CONTENT_TYPE, metrics::CONTENT_TYPE)], body).into_response()
 }
 
@@ -331,7 +349,7 @@ fn repo_card(
                     dt { "Tip" }
                     dd {
                         @match &inspection.tip {
-                            Some(sha) => code .sha title=(sha) { (sha.get(..12).unwrap_or(sha)) },
+                            Some(sha) => (short_sha(sha)),
                             None if fetched => span .muted { "No commits yet" },
                             None => span .muted { "—" },
                         }
@@ -346,6 +364,9 @@ fn repo_card(
                         }
                     }
                 }
+            }
+            @if let Some(preserved) = &inspection.preserved {
+                (preserved_refs(preserved))
             }
             @if let Some(clone) = clone {
             div .clone-line {
@@ -366,6 +387,29 @@ fn reason(state: &RepoState) -> Markup {
     html! {
         @if let Some(reason) = &state.reason {
             pre .reason { (reason) }
+        }
+    }
+}
+
+/// How many refs the archive preserved from before rewrites, expanding to
+/// their names and SHAs.
+fn preserved_refs(preserved: &BTreeMap<String, String>) -> Markup {
+    let label = html! {
+        (icon_history())
+        span { span .count { (preserved.len()) } " preserved ref" @if preserved.len() != 1 { "s" } }
+    };
+    html! {
+        @if preserved.is_empty() {
+            p .preserved { (label) }
+        } @else {
+            details .preserved {
+                summary { (label) }
+                ul .preserved-refs {
+                    @for (name, sha) in preserved {
+                        li { code .ref { (name) } (short_sha(sha)) }
+                    }
+                }
+            }
         }
     }
 }
@@ -391,6 +435,11 @@ fn endpoint_base(headers: &HeaderMap, uri: &Uri) -> String {
         .or_else(|| uri.authority().map(|a| a.as_str()))
         .unwrap_or("localhost");
     format!("http://{host}")
+}
+
+/// The first 12 characters of a SHA, with the whole SHA on hover.
+fn short_sha(sha: &str) -> Markup {
+    html! { code .sha title=(sha) { (sha.get(..12).unwrap_or(sha)) } }
 }
 
 /// A `<time>` showing how long ago `then` was, with the exact UTC time on
@@ -525,6 +574,14 @@ fn icon_refresh_cw_off() -> Markup {
 fn icon_circle_alert() -> Markup {
     PreEscaped(
         r#"<svg class="icon icon-circle-alert" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>"#
+            .to_owned(),
+    )
+}
+
+/// Lucide `history`.
+fn icon_history() -> Markup {
+    PreEscaped(
+        r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>"#
             .to_owned(),
     )
 }

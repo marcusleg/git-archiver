@@ -150,6 +150,7 @@ impl FakeForge {
         git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
         Upstream {
             url: format!("http://{}/{path}.git", self.addr),
+            bare,
             work,
         }
     }
@@ -158,12 +159,20 @@ impl FakeForge {
 /// One repo on the fake forge, with a working copy to make changes in.
 pub struct Upstream {
     url: String,
+    /// The repo the forge serves.
+    bare: PathBuf,
     work: PathBuf,
 }
 
 impl Upstream {
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The served repo on disk, for fetching from it without going through
+    /// the forge (which a blocking `git` call in a test would deadlock).
+    pub fn served_path(&self) -> &str {
+        self.bare.to_str().unwrap()
     }
 
     /// Commits a change on the current branch, pushes it and returns the
@@ -218,6 +227,18 @@ impl Upstream {
                 "origin",
                 &format!("refs/tags/{name}"),
             ],
+        );
+    }
+
+    /// Makes a new branch at the current commit upstream's default branch,
+    /// the way a forge's "rename default branch" setting would. The old
+    /// branch stays upstream.
+    pub fn switch_default_branch(&self, name: &str) {
+        git(&self.work, &["checkout", "-q", "-b", name]);
+        git(&self.work, &["push", "-q", "origin", "HEAD"]);
+        git(
+            &self.bare,
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{name}")],
         );
     }
 
