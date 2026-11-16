@@ -393,23 +393,42 @@ pub fn check_repo_url(repo: &str) -> Result<RepoId, &'static str> {
     RepoId::from_url(repo).map_err(|_| "has an unsupported repository path")
 }
 
-/// Why a repo couldn't be added to the config.
-#[derive(Debug)]
-pub enum AddError {
-    /// The file doesn't hold a valid config right now. Its own error is for
-    /// the log only.
-    Invalid(anyhow::Error),
-    /// A repo with the same archive is tracked under this URL.
-    AlreadyTracked(String),
-    /// Reading or writing the file failed.
-    Io(anyhow::Error),
+/// A change to the config's `repos` list.
+pub enum RepoListChange<'a> {
+    /// Append `url`, whose identity is `id`.
+    Add { url: &'a str, id: &'a RepoId },
+    /// Remove every entry that shares the archive of `id`.
+    Remove { id: &'a RepoId },
 }
 
-/// Held while the config is read for its repo list or changed, so an add and
+/// Why the repo list couldn't be changed. None of these quotes text from the
+/// config (ADR 0003), apart from [`EditError::AlreadyTracked`], which carries
+/// the tracked URL for the caller to show.
+#[derive(Debug)]
+pub enum EditError {
+    /// The file doesn't hold a valid config right now, or the edit didn't
+    /// come out as intended. Its own error is for the log only.
+    Invalid(anyhow::Error),
+    /// Reading or writing the file failed.
+    Io(anyhow::Error),
+    /// Adding only: a repo with the same archive is tracked under this URL.
+    AlreadyTracked(String),
+}
+
+/// What a repo-list edit did to the file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Edited {
+    Changed,
+    /// Removing only: the config didn't list the repo, so the file is left
+    /// alone.
+    NotListed,
+}
+
+/// Held while the config is read for its repo list or changed, so an edit and
 /// a reload never interleave.
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
-/// Loads the config and hands the result to `f`, with no add in between.
+/// Loads the config and hands the result to `f`, with no edit in between.
 pub fn load_locked<T>(path: &Path, f: impl FnOnce(anyhow::Result<Config>) -> T) -> T {
     let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     f(load(path))
@@ -418,107 +437,86 @@ pub fn load_locked<T>(path: &Path, f: impl FnOnce(anyhow::Result<Config>) -> T) 
 /// Checks that the repo could be added now: the config is valid and doesn't
 /// track a repo with the same archive yet. Returns the token to check
 /// upstream with, if the repo's host has one.
-pub fn check_add(path: &Path, id: &RepoId) -> Result<Option<Token>, AddError> {
-    let (_, config) = read_for_add(path, id)?;
+pub fn check_add(path: &Path, id: &RepoId) -> Result<Option<Token>, EditError> {
+    let (_, config) = read_for_edit(path)?;
+    refuse_if_tracked(&config, id)?;
     Ok(config.tokens.for_repo(id).cloned())
 }
 
-/// Appends `url`, whose identity is `id`, to `repos`, then calls `on_added`
-/// with the new repo list before any other add or reload can read the file.
-/// The file is edited in place, so the operator's comments and formatting
-/// survive, and replaced in one step, so a crash never leaves a partial
-/// config.
-pub fn add_repo(
+/// Applies `change` to `repos`, then calls `on_edited` with the resulting
+/// repo list (also when nothing changed) before any other edit or reload can
+/// read the file. The file is edited in place, so the operator's comments and
+/// formatting survive, the result is checked to list exactly the expected
+/// repos, and the file is replaced in one step, so a crash never leaves a
+/// partial config.
+pub fn edit_repo_list(
     path: &Path,
-    url: &str,
-    id: &RepoId,
-    on_added: impl FnOnce(&[String]),
-) -> Result<(), AddError> {
+    change: RepoListChange<'_>,
+    on_edited: impl FnOnce(&[String]),
+) -> Result<Edited, EditError> {
     let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // A symlinked config is replaced at its target, keeping the link.
     let path = std::fs::canonicalize(path)
         .with_context(|| format!("couldn't read config {}", path.display()))
-        .map_err(AddError::Io)?;
-    let (text, config) = read_for_add(&path, id)?;
+        .map_err(EditError::Io)?;
+    let (text, config) = read_for_edit(&path)?;
 
-    let edited = append_repo(&text, url).map_err(AddError::Invalid)?;
-    let repos = parse(&edited)
-        .context("the edited config doesn't parse")
-        .map_err(AddError::Invalid)?
-        .repos;
-    let mut expected = config.repos;
-    expected.push(url.to_owned());
-    if repos != expected {
-        return Err(AddError::Invalid(anyhow::anyhow!(
-            "the edited config lists {repos:?}, expected {expected:?}"
-        )));
-    }
-    write_atomically(&path, &edited).map_err(AddError::Io)?;
-    on_added(&repos);
-    Ok(())
-}
-
-/// Why a repo couldn't be removed from the config.
-#[derive(Debug)]
-pub enum RemoveError {
-    /// The file doesn't hold a valid config right now. Its own error is for
-    /// the log only.
-    Invalid(anyhow::Error),
-    /// Reading or writing the file failed.
-    Io(anyhow::Error),
-}
-
-/// Removes every `repos` entry that shares the archive of `id`, then calls
-/// `on_read` with the resulting repo list before any other change or reload
-/// can read the file. Returns whether the config listed the repo; if it
-/// didn't, the file is left alone. Like adding, the file is edited in place
-/// and replaced in one step.
-pub fn remove_repo(
-    path: &Path,
-    id: &RepoId,
-    on_read: impl FnOnce(&[String]),
-) -> Result<bool, RemoveError> {
-    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = std::fs::canonicalize(path)
-        .with_context(|| format!("couldn't read config {}", path.display()))
-        .map_err(RemoveError::Io)?;
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("couldn't read config {}", path.display()))
-        .map_err(RemoveError::Io)?;
-    let config = parse(&text).map_err(RemoveError::Invalid)?;
     let same_archive =
-        |repo: &str| RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id));
-    let expected: Vec<String> = config
-        .repos
-        .iter()
-        .filter(|repo| !same_archive(repo))
-        .cloned()
-        .collect();
-    if expected.len() == config.repos.len() {
-        on_read(&config.repos);
-        return Ok(false);
-    }
-
-    let edited = remove_entries(&text, same_archive).map_err(RemoveError::Invalid)?;
+        |repo: &str, id: &RepoId| RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id));
+    let (edited, expected) = match change {
+        RepoListChange::Add { url, id } => {
+            refuse_if_tracked(&config, id)?;
+            let mut expected = config.repos;
+            expected.push(url.to_owned());
+            (append_repo(&text, url), expected)
+        }
+        RepoListChange::Remove { id } => {
+            let expected: Vec<String> = config
+                .repos
+                .iter()
+                .filter(|repo| !same_archive(repo, id))
+                .cloned()
+                .collect();
+            if expected.len() == config.repos.len() {
+                on_edited(&config.repos);
+                return Ok(Edited::NotListed);
+            }
+            (
+                remove_entries(&text, |repo| same_archive(repo, id)),
+                expected,
+            )
+        }
+    };
+    let edited = edited.map_err(EditError::Invalid)?;
     let repos = parse(&edited)
         .context("the edited config doesn't parse")
-        .map_err(RemoveError::Invalid)?
+        .map_err(EditError::Invalid)?
         .repos;
     if repos != expected {
-        return Err(RemoveError::Invalid(anyhow::anyhow!(
-            "the edited config lists {repos:?}, expected {expected:?}"
+        // The lists are the operator's text, so they aren't quoted.
+        return Err(EditError::Invalid(anyhow::anyhow!(
+            "the edited config doesn't list the expected repos ({} listed, {} expected)",
+            repos.len(),
+            expected.len()
         )));
     }
-    write_atomically(&path, &edited).map_err(RemoveError::Io)?;
-    on_read(&repos);
-    Ok(true)
+    write_atomically(&path, &edited).map_err(EditError::Io)?;
+    on_edited(&repos);
+    Ok(Edited::Changed)
+}
+
+/// `text` as an editable document. toml_edit's own error quotes the line it
+/// stopped at, so it is replaced by one that quotes nothing.
+fn edit_document(text: &str) -> anyhow::Result<DocumentMut> {
+    text.parse()
+        .map_err(|_| anyhow::anyhow!("the config couldn't be edited in place"))
 }
 
 /// The config text without the `repos` entries `remove` picks, keeping the
 /// file's line endings.
 fn remove_entries(text: &str, remove: impl Fn(&str) -> bool) -> anyhow::Result<String> {
     keeping_line_endings(text, |text| {
-        let mut doc: DocumentMut = text.parse()?;
+        let mut doc = edit_document(text)?;
         let repos = doc
             .get_mut("repos")
             .and_then(|repos| repos.as_array_mut())
@@ -592,22 +590,25 @@ fn remove_formatted(array: &mut Array, index: usize) {
     }
 }
 
-/// The config's text and contents, if a repo with identity `id` could be
-/// added to it.
-fn read_for_add(path: &Path, id: &RepoId) -> Result<(String, Config), AddError> {
+/// The config's text and contents.
+fn read_for_edit(path: &Path) -> Result<(String, Config), EditError> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("couldn't read config {}", path.display()))
-        .map_err(AddError::Io)?;
-    let config = parse(&text).map_err(AddError::Invalid)?;
-    // URLs differing only in scheme share an archive, so they count as the
-    // same repo here.
+        .map_err(EditError::Io)?;
+    let config = parse(&text).map_err(EditError::Invalid)?;
+    Ok((text, config))
+}
+
+/// Refuses a repo whose archive the config already tracks. URLs differing
+/// only in scheme share an archive, so they count as the same repo.
+fn refuse_if_tracked(config: &Config, id: &RepoId) -> Result<(), EditError> {
     let tracked = config
         .repos
         .iter()
         .find(|repo| RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id)));
     match tracked {
-        Some(existing) => Err(AddError::AlreadyTracked(existing.clone())),
-        None => Ok((text, config)),
+        Some(existing) => Err(EditError::AlreadyTracked(existing.clone())),
+        None => Ok(()),
     }
 }
 
@@ -615,7 +616,7 @@ fn read_for_add(path: &Path, id: &RepoId) -> Result<(String, Config), AddError> 
 /// around it and keeping the file's line endings.
 fn append_repo(text: &str, url: &str) -> anyhow::Result<String> {
     keeping_line_endings(text, |text| {
-        let mut doc: DocumentMut = text.parse()?;
+        let mut doc = edit_document(text)?;
         let has_settings = doc.iter().any(|(_, item)| item.is_value());
         Ok(match doc.get_mut("repos") {
             Some(repos) => {
@@ -785,4 +786,16 @@ fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, C
         }
     }
     Ok(Tokens(tokens))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edit_document;
+
+    #[test]
+    fn a_document_that_cannot_be_edited_quotes_nothing_from_it() {
+        let error =
+            edit_document("repos = [\"https://ghp_secret@example.com/a/b\"\nx = ").unwrap_err();
+        assert!(!format!("{error:#}").contains("ghp_secret"));
+    }
 }
