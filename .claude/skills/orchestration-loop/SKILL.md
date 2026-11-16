@@ -24,6 +24,7 @@ Why separate sessions, not subagents: `/implement` runs `/code-review`, which sp
 - **Blocked:** an issue with an open blocker. Read the blockers from native dependencies:
   `gh api repos/{owner}/{repo}/issues/<n> --jq .issue_dependencies_summary.blocked_by` (that count includes only open blockers). If the API lacks the field, fall back to a `Blocked by: #a, #b` line in the body, and treat the issue as blocked while any of those issues is open.
 - **Running:** an issue with a live worker. Its branch is `issue-<n>-<slug>`, its space is named `#<n> <short title>`, and it is assigned to `@me`.
+- **Short title:** the issue's subject in two to four words that you choose, rather than its full title. "Untrack repos and list untracked archives" becomes "Untrack repos". The **slug** is the short title in kebab case (`untrack-repos`), and the branch and worktree names use it.
 - **Frontier:** issues that are neither blocked, running, nor assigned to someone.
 
 ## 0. Preconditions
@@ -126,4 +127,4 @@ The loop ends when no issue is left that is either in the frontier or running. I
 - PRs still open or failing, with links;
 - stuck or blocked issues, and why;
 - any spec whose issues are now all closed, so the user can close it;
-- **Decisions:** every gap you settled yourself (branch names, anything else).
+- **Decisions:** every gap you settled yourself.
