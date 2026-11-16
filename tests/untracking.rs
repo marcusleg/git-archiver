@@ -412,6 +412,10 @@ async fn the_config_warning_names_an_unknown_field_with_credentials_without_show
             "[\"https://user:secretpw@github.com\"]\ntoken = \"x\"\n",
             "expected one of `interval`",
         ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw\\u0040github.com\" = \"x\"\n",
+            "expected `token`",
+        ),
     ];
     for (table, expected) in tables {
         let CredentialsWarning {
@@ -439,34 +443,24 @@ async fn the_config_warning_names_an_unknown_field_with_credentials_without_show
 
 #[tokio::test]
 async fn the_config_warning_names_a_key_with_an_escaped_at_without_showing_its_credentials() {
-    let tables = [
-        (
-            "[hosts]\n\"https://user:secretpw\\u0040github.com\" = \"ghp_x\"\n",
-            "invalid type",
-        ),
-        (
-            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw\\u0040github.com\" = \"x\"\n",
-            "unknown field `https://…@github.com`, expected `token`",
-        ),
-    ];
-    for (table, expected) in tables {
-        let CredentialsWarning {
-            banner,
-            page,
-            logged,
-        } = write_config_with_credentials(&format!(
-            "{}\n{table}",
-            config_tracking(&[GOOD_REPO, "https://example.com/new/repo"]),
-        ))
-        .await;
+    let CredentialsWarning {
+        banner,
+        page,
+        logged,
+    } = write_config_with_credentials(&format!(
+        "{}\n[hosts]\n\"https://user:secretpw\\u0040github.com\" = \"ghp_x\"\n",
+        config_tracking(&[GOOD_REPO, "https://example.com/new/repo"]),
+    ))
+    .await;
 
-        assert!(banner.contains("line "), "where: {banner}");
-        assert!(banner.contains("column "), "where: {banner}");
-        assert!(banner.contains(expected), "what: {banner}");
-        assert!(!page.contains("user:"), "{page}");
-        assert!(logged.contains(expected), "{logged}");
-        assert!(!logged.contains("user:"), "{logged}");
-    }
+    assert!(
+        banner.contains("(`\"https://…@github.com\"`), column "),
+        "where: {banner}"
+    );
+    assert!(banner.contains("invalid type"), "what: {banner}");
+    assert!(!page.contains("user:"), "{page}");
+    assert!(logged.contains("invalid type"), "{logged}");
+    assert!(!logged.contains("user:"), "{logged}");
 }
 
 #[tokio::test]

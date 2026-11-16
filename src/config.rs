@@ -174,7 +174,7 @@ fn syntax_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let line_number = text[..start].matches('\n').count() + 1;
     let column = text[line_start..start].chars().count() + 1;
     let line = text[line_start..].lines().next().unwrap_or_default();
-    let place = match key_set_on(line).and_then(read_key) {
+    let place = match key_set_on(line).and_then(unescaped_key) {
         Some(key) => {
             let shown = hide_credentials(&key);
             format!("line {line_number} (`{shown}`)")
@@ -210,10 +210,11 @@ fn key_set_on(line: &str) -> Option<&str> {
 }
 
 /// The key as toml reads it, escapes applied, so that hiding credentials
-/// finds an `@` however it's written, such as `\u0040`. Each part of a
-/// dotted key is shown bare if it can be, and quoted otherwise. None if toml
-/// can't read the key.
-fn read_key(key: &str) -> Option<String> {
+/// finds an `@` however it's written, such as `\u0040`. For display only:
+/// each part of a dotted key is shown bare if it can be, and otherwise
+/// quoted the way Rust quotes a string, which may not be valid toml. None if
+/// toml can't read the key.
+fn unescaped_key(key: &str) -> Option<String> {
     let parts = toml_edit::Key::parse(key).ok()?;
     let shown: Vec<String> = parts
         .iter()
