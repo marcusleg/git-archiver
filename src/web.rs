@@ -519,7 +519,7 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
     // Only an archive on disk can be cloned.
     let clone = archived.then(|| git_http::clone_command(base, id));
     let fetched = state.status == Some(Status::Available);
-    let failed = matches!(
+    let unavailable_or_failed = matches!(
         state.status,
         Some(Status::Unavailable | Status::FetchFailed)
     );
@@ -564,26 +564,16 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
                 },
             }
             dl .facts {
-                div {
-                    dt { "Last attempt" }
-                    dd {
-                        @match state.last_attempt {
-                            Some(attempt) => (time(attempt, now)),
-                            None => "Never",
-                        }
-                    }
-                }
                 // An Available card's status line already says when.
-                @if failed {
+                @if unavailable_or_failed {
                     div {
                         dt { "Last success" }
-                        dd {
-                            @match state.last_success {
-                                Some(success) => (time(success, now)),
-                                None => "Never",
-                            }
-                        }
+                        dd { (time_or_never(state.last_success, now)) }
                     }
+                }
+                div {
+                    dt { "Last attempt" }
+                    dd { (time_or_never(state.last_attempt, now)) }
                 }
                 div {
                     dt { "Default branch" }
@@ -695,6 +685,14 @@ fn short_sha(sha: &str) -> Markup {
 /// hover.
 fn time(then: SystemTime, now: SystemTime) -> Markup {
     time_element(then, &time_ago(then, now))
+}
+
+/// [`time`] for `then`, or "Never" without one.
+fn time_or_never(then: Option<SystemTime>, now: SystemTime) -> Markup {
+    match then {
+        Some(then) => time(then, now),
+        None => html! { "Never" },
+    }
 }
 
 /// A `<time>` for `at` showing `text`, with the exact UTC time on hover.
