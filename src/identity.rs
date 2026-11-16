@@ -66,6 +66,12 @@ impl RepoId {
         &self.host
     }
 
+    /// Whether the two identities share one archive, as URLs differing only
+    /// in scheme do.
+    pub fn same_archive(&self, other: &RepoId) -> bool {
+        self.host_and_path == other.host_and_path
+    }
+
     /// Where the archive lives, relative to `repos/`.
     pub fn archive_path(&self) -> PathBuf {
         PathBuf::from(format!("{}.git", self.host_and_path))

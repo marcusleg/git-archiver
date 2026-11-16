@@ -87,7 +87,7 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
     }));
     let archives = Arc::new(Archives::new(&data_dir));
     let wake_scheduler = Arc::new(tokio::sync::Notify::new());
-    let untracked = Arc::new(tokio::sync::Notify::new());
+    let untrack_signal = Arc::new(tokio::sync::Notify::new());
     let scheduler = tokio::spawn(
         Scheduler {
             clock: options.clock.clone(),
@@ -99,7 +99,7 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
             overview: overview.clone(),
             wake: wake_scheduler.clone(),
             tokens: config.tokens,
-            untracked: untracked.clone(),
+            untrack_signal: untrack_signal.clone(),
             config_error: None,
         }
         .run(),
@@ -112,7 +112,7 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         archives,
         overview,
         wake_scheduler,
-        untracked,
+        untrack_signal,
     }));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {

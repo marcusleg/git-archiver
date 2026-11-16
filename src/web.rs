@@ -21,7 +21,7 @@ use crate::config::{self, AddError, RemoveError};
 use crate::git_http;
 use crate::identity::RepoId;
 use crate::metrics;
-use crate::overview::SharedOverview;
+use crate::overview::{SharedOverview, save_state};
 use crate::state::{RepoState, Status};
 
 pub struct AppState {
@@ -32,7 +32,7 @@ pub struct AppState {
     pub overview: SharedOverview,
     pub wake_scheduler: Arc<Notify>,
     /// Stops a running fetch of a repo untracked here.
-    pub untracked: Arc<Notify>,
+    pub untrack_signal: Arc<Notify>,
 }
 
 /// How long the add form waits for upstream to answer.
@@ -268,13 +268,17 @@ async fn try_untrack(app: &AppState, id: &RepoId, archive: ArchiveChoice) -> Res
         return Ok(());
     }
     tracing::info!(repo = %id, "untracked");
-    app.untracked.notify_waiters();
+    app.untrack_signal.notify_waiters();
     app.wake_scheduler.notify_one();
     if archive == ArchiveChoice::Keep {
         return Ok(());
     }
 
-    let _exclusive = app.archives.exclusive().await;
+    let _exclusive = app.archives.exclusive(id).await;
+    if app.overview.lock().unwrap().is_tracked(id) {
+        // Added again while waiting: the archive is in use once more.
+        return Ok(());
+    }
     app.archives.delete(id).await.map_err(|e| {
         tracing::error!(repo = %id, error = %format!("{e:#}"), "couldn't delete archive");
         format!(
@@ -285,14 +289,8 @@ async fn try_untrack(app: &AppState, id: &RepoId, archive: ArchiveChoice) -> Res
             app.archives.path(id).display()
         )
     })?;
-    let state = {
-        let mut overview = app.overview.lock().unwrap();
-        overview.forget(id);
-        overview.state.clone()
-    };
-    if let Err(e) = state.save(&app.state_path) {
-        tracing::error!(error = %format!("{e:#}"), "couldn't save state");
-    }
+    app.overview.lock().unwrap().forget(id);
+    save_state(&app.overview, &app.state_path);
     tracing::info!(repo = %id, "deleted archive");
     Ok(())
 }
@@ -349,6 +347,15 @@ async fn card_view(app: &AppState, title: String, id: RepoId, state: RepoState) 
     }
 }
 
+/// Cards for archives given by title, identity and state.
+async fn card_views(app: &AppState, archives: Vec<(String, RepoId, RepoState)>) -> Vec<CardView> {
+    let mut cards = Vec::with_capacity(archives.len());
+    for (title, id, state) in archives {
+        cards.push(card_view(app, title, id, state).await);
+    }
+    cards
+}
+
 /// The list page. `problem` says why the last action failed.
 async fn render_list(
     app: &AppState,
@@ -376,14 +383,8 @@ async fn render_list(
             .collect();
         (tracked, untracked, overview.config_error.clone())
     };
-    let mut cards = Vec::with_capacity(tracked.len());
-    for (title, id, state) in tracked {
-        cards.push(card_view(app, title, id, state).await);
-    }
-    let mut untracked_cards = Vec::with_capacity(untracked.len());
-    for (title, id, state) in untracked {
-        untracked_cards.push(card_view(app, title, id, state).await);
-    }
+    let cards = card_views(app, tracked).await;
+    let untracked_cards = card_views(app, untracked).await;
     let now = app.clock.now();
 
     Html(
@@ -505,9 +506,9 @@ fn add_form(form: &AddForm) -> Markup {
     }
 }
 
-/// A repo's card. A tracked repo's card is number `untrack` on the page and
-/// can be untracked; an untracked archive's card is read-only.
-fn repo_card(card: &CardView, untrack: Option<usize>, base: &str, now: SystemTime) -> Markup {
+/// A repo's card. A tracked repo's card offers to untrack it, through the
+/// page's dialog number `dialog`; an untracked archive's card is read-only.
+fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime) -> Markup {
     let CardView {
         title,
         id,
@@ -522,7 +523,7 @@ fn repo_card(card: &CardView, untrack: Option<usize>, base: &str, now: SystemTim
         article .card {
             div .card-head {
                 h3 .repo-url { (title) }
-                @if let Some(n) = untrack {
+                @if let Some(n) = dialog {
                     (untrack_dialog(id, n))
                 }
             }

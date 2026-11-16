@@ -12,7 +12,7 @@ use crate::archive::{Archives, FetchError};
 use crate::clock::Clock;
 use crate::config::{self, Tokens};
 use crate::identity::RepoId;
-use crate::overview::{Overview, SharedOverview, Tracked};
+use crate::overview::{Overview, SharedOverview, Tracked, save_state};
 use crate::state::Status;
 
 /// Every fetch is stopped after this long.
@@ -36,7 +36,7 @@ pub struct Scheduler {
     /// fetch.
     pub tokens: Tokens,
     /// Notified after a repo was untracked in the UI, to stop its fetch.
-    pub untracked: Arc<Notify>,
+    pub untrack_signal: Arc<Notify>,
     /// The last config error logged, so a broken file is logged once.
     pub config_error: Option<String>,
 }
@@ -134,7 +134,7 @@ impl Scheduler {
         loop {
             // Registered before checking, so an untrack right after the
             // check still wakes it.
-            let notified = self.untracked.notified();
+            let notified = self.untrack_signal.notified();
             let mut notified = std::pin::pin!(notified);
             notified.as_mut().enable();
             if !self.overview.lock().unwrap().is_tracked(id) {
@@ -149,14 +149,20 @@ impl Scheduler {
     async fn fetch(&self, repo: Tracked) {
         // Held until the state is saved, so deleting an archive never
         // interleaves with fetching it.
-        let _exclusive = self.archives.exclusive().await;
+        let _exclusive = self.archives.exclusive(&repo.id).await;
+        let had_archive = self.archives.exists(&repo.id);
         let attempt = whole_seconds(self.clock.now());
         let timer = Instant::now();
         let token = self.tokens.for_repo(&repo.id);
         let result = tokio::select! {
             biased;
             () = self.until_untracked(&repo.id) => {
-                tracing::info!(repo = %repo.id, "not fetching: no longer tracked");
+                tracing::info!(repo = %repo.id, "stopped fetching: no longer tracked");
+                // A first fetch stopped midway leaves an empty archive,
+                // which isn't worth keeping.
+                if !had_archive && let Err(e) = self.archives.delete(&repo.id).await {
+                    tracing::warn!(repo = %repo.id, error = %format!("{e:#}"), "couldn't delete archive");
+                }
                 return;
             }
             result = async {
@@ -173,7 +179,7 @@ impl Scheduler {
         let duration = timer.elapsed();
         let size = self.archives.size(&repo.id).await;
 
-        let state = {
+        {
             let mut overview = self.overview.lock().unwrap();
             overview.last_fetch_duration = Some(duration);
             overview.fetch_first.retain(|id| *id != repo.id);
@@ -220,11 +226,8 @@ impl Scheduler {
             if result.is_ok() {
                 tracing::info!(repo = %repo.id, duration_ms = duration.as_millis(), "fetched");
             }
-            overview.state.clone()
-        };
-        if let Err(e) = state.save(&self.state_path) {
-            tracing::error!(error = %format!("{e:#}"), "couldn't save state");
         }
+        save_state(&self.overview, &self.state_path);
     }
 }
 

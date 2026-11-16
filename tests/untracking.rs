@@ -228,6 +228,13 @@ async fn adding_an_untracked_repo_again_in_the_ui_continues_its_archive() {
     let (app, archive, preserved) = untracked_archive_with_preserved_ref(&forge, &upstream).await;
     let before = refs(&archive)[&preserved].clone();
     let tip = upstream.commit("second");
+    let id = format!("http://{}/foo/bar", forge.host());
+    let metrics = app.metrics().await;
+    assert_eq!(
+        metrics.value("archiver_repo_preserved_refs", &[("repo", &id)]),
+        Some(1.0),
+        "an untracked archive keeps its metrics"
+    );
 
     let page = app.add_repo(upstream.url()).await;
     assert_eq!(page.status, 200, "{}", page.text());
@@ -499,4 +506,30 @@ async fn untracking_while_the_config_is_invalid_says_so_and_changes_nothing() {
     assert!(alert.contains("invalid"), "{alert}");
     assert_eq!(app.config(), broken);
     assert_eq!(tracked(&app).await, [url]);
+}
+
+#[tokio::test]
+async fn deleting_an_archive_never_waits_for_another_repos_fetch() {
+    let forge = FakeForge::start().await;
+    let stuck = forge.create_repo("a/stuck");
+    stuck.commit("first");
+    let gone = forge.create_repo("a/gone");
+    gone.commit("first");
+    let app = TestApp::tracking(&[gone.url(), stuck.url()]).await;
+    app.advance_and_settle(12 * HOUR).await;
+    let archive = app.archive(&format!("{}/a/gone", forge.host()));
+    assert!(archive.exists());
+    forge.hang("a/stuck");
+    app.advance(12 * HOUR);
+    forge.wait_for_hung_request().await;
+
+    let page = tokio::time::timeout(
+        Duration::from_secs(10),
+        untrack(&app, gone.url(), "Delete archive"),
+    )
+    .await
+    .expect("deleting doesn't wait for the other fetch");
+
+    assert_eq!(page.status, 200, "{}", page.text());
+    assert!(!archive.exists());
 }
