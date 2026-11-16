@@ -410,6 +410,23 @@ token = "ghp_secretpw"
             "[hosts.\"github.com\"]\ntoken = '''\nghp_secret=pw''' secretpw",
             "line 3, column 18: unexpected key or value, expected newline, `#`".into(),
         ),
+        // toml's own words, which it quotes as what it expected.
+        (
+            "interval = tru",
+            "line 1, column 12: invalid boolean, expected `true`".into(),
+        ),
+        (
+            "interval = fals",
+            "line 1, column 12: invalid boolean, expected `false`".into(),
+        ),
+        (
+            "interval = +inx",
+            "line 1, column 13: invalid float, expected `inf`".into(),
+        ),
+        (
+            "interval = nax",
+            "line 1, column 12: invalid float, expected `nan`".into(),
+        ),
         // Values the app checks itself.
         (
             "interval = \"secretpw\"",
