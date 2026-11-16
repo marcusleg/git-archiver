@@ -208,9 +208,27 @@ fn parse_interval(text: &str) -> anyhow::Result<Duration> {
 
 fn validate_repo_url(repo: String) -> anyhow::Result<String> {
     if let Err(problem) = check_repo_url(&repo) {
-        bail!("`repos` entry {repo:?} {problem}");
+        let shown = hide_credentials(&repo);
+        bail!("`repos` entry {shown:?} {problem}");
     }
     Ok(repo)
+}
+
+/// The URL as written, with everything between the scheme and the last `@`
+/// replaced by `…`, so a rejection can name the entry without showing a
+/// credential in the UI or the log. Any user name and password end at an
+/// `@`, so cutting up to the last one also covers a URL that a parser reads
+/// differently than its author meant, such as one whose unencoded password
+/// holds a `#`.
+fn hide_credentials(repo: &str) -> String {
+    let (scheme, rest) = match repo.split_once("://") {
+        Some((scheme, rest)) => (format!("{scheme}://"), rest),
+        None => (String::new(), repo),
+    };
+    match rest.rfind('@') {
+        Some(at) => format!("{scheme}…{}", &rest[at..]),
+        None => repo.to_owned(),
+    }
 }
 
 /// The repo's identity if the config would accept this URL; otherwise why
