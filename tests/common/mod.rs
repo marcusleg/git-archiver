@@ -222,7 +222,44 @@ impl TestApp {
 
     pub async fn get(&self, path: &str) -> Page {
         let url = format!("http://{}{}", self.addr(), path);
-        let response = reqwest::get(&url).await.expect("request succeeds");
+        Page::from(reqwest::get(&url).await.expect("request succeeds")).await
+    }
+
+    /// Submits a form the way a browser does, following the redirect after a
+    /// successful post.
+    pub async fn post_form(&self, path: &str, fields: &[(&str, &str)]) -> Page {
+        let url = format!("http://{}{}", self.addr(), path);
+        let response = reqwest::Client::new()
+            .post(&url)
+            .form(fields)
+            .send()
+            .await
+            .expect("request succeeds");
+        Page::from(response).await
+    }
+
+    /// Fills in the list page's add form with this URL and submits it.
+    pub async fn add_repo(&self, url: &str) -> Page {
+        let page = self.get("/").await.text();
+        let action = {
+            let html = scraper::Html::parse_document(&page);
+            let selector = scraper::Selector::parse("form:has(input[name=url])").unwrap();
+            let form = html
+                .select(&selector)
+                .next()
+                .unwrap_or_else(|| panic!("the list page has no add form: {page}"));
+            assert_eq!(form.value().attr("method"), Some("post"));
+            form.value()
+                .attr("action")
+                .expect("form has an action")
+                .to_owned()
+        };
+        self.post_form(&action, &[("url", url)]).await
+    }
+}
+
+impl Page {
+    async fn from(response: reqwest::Response) -> Self {
         let status = response.status().as_u16();
         let content_type = response
             .headers()

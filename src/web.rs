@@ -3,20 +3,24 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use axum::Router;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Form, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
-use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{any, get};
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::routing::{any, get, post};
 use maud::{DOCTYPE, Markup, PreEscaped, html};
+use serde::Deserialize;
+use tokio::sync::Notify;
 
-use crate::archive::{Archives, Inspection};
+use crate::archive::{self, Archives, Inspection};
 use crate::clock::Clock;
+use crate::config::{self, AddError};
 use crate::git_http;
+use crate::identity::RepoId;
 use crate::metrics;
-use crate::overview::{SharedOverview, Tracked};
+use crate::overview::{self, SharedOverview, Tracked};
 use crate::state::{RepoState, Status};
 
 pub struct AppState {
@@ -24,7 +28,11 @@ pub struct AppState {
     pub clock: Arc<dyn Clock>,
     pub archives: Arc<Archives>,
     pub overview: SharedOverview,
+    pub wake_scheduler: Arc<Notify>,
 }
+
+/// How long the add form waits for upstream to answer.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 const STYLESHEET: &str = include_str!("../assets/style.css");
 
@@ -48,6 +56,7 @@ const ASSET_CACHE: &str = "public, max-age=3600";
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_page))
+        .route("/repos", post(add_repo))
         .route("/metrics", get(metrics))
         .route("/git/{*path}", any(git))
         .route("/assets/style.css", get(stylesheet))
@@ -86,8 +95,99 @@ fn asset(content_type: &'static str, body: &'static [u8]) -> Response {
         .into_response()
 }
 
+#[derive(Deserialize)]
+struct AddRepo {
+    #[serde(default)]
+    url: String,
+}
+
+/// What the add form shows: the URL typed and why it wasn't added.
+#[derive(Default)]
+struct AddForm {
+    url: String,
+    error: Option<String>,
+}
+
+async fn add_repo(
+    State(app): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Form(form): Form<AddRepo>,
+) -> Response {
+    let url = form.url.trim();
+    match try_add(&app, url).await {
+        Ok(()) => Redirect::to("/").into_response(),
+        Err(error) => {
+            let form = AddForm {
+                url: url.to_owned(),
+                error: Some(error),
+            };
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                render_list(&app, &form, &endpoint_base(&headers, &uri)).await,
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Checks the URL, makes sure upstream answers, writes it into the config
+/// and queues its clone. On failure, says why for the form.
+async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
+    if url.is_empty() {
+        return Err("Enter the URL of the repo to add.".to_owned());
+    }
+    config::check_repo_url(url).map_err(|problem| format!("“{url}” {problem}."))?;
+    let id = RepoId::from_url(url).map_err(|e| format!("{e:#}"))?;
+    config::check_add(&app.config_path, url).map_err(|e| add_error(app, url, e))?;
+
+    let deadline = app.clock.now() + PROBE_TIMEOUT;
+    let probe = tokio::select! {
+        result = archive::probe(url) => result,
+        () = app.clock.sleep_until(deadline) => {
+            Err("it didn’t answer within a minute.".to_owned())
+        }
+    };
+    probe.map_err(|message| format!("Couldn’t reach “{url}”: {message}"))?;
+
+    let repos = config::add_repo(&app.config_path, url).map_err(|e| add_error(app, url, e))?;
+    tracing::info!(repo = %id, "added");
+    {
+        let mut overview = app.overview.lock().unwrap();
+        overview.tracked = overview::tracked(&repos);
+        overview.jump_queue(id, app.clock.now());
+    }
+    app.wake_scheduler.notify_one();
+    Ok(())
+}
+
+fn add_error(app: &AppState, url: &str, error: AddError) -> String {
+    match error {
+        AddError::AlreadyTracked(existing) if existing == url => {
+            format!("“{url}” is already tracked.")
+        }
+        AddError::AlreadyTracked(existing) => {
+            format!("“{url}” is already tracked as “{existing}”.")
+        }
+        AddError::Invalid(e) => {
+            tracing::error!(error = %format!("{e:#}"), "couldn't add a repo to the config");
+            format!(
+                "Couldn’t add the repo: the config file is invalid. Fix {} and try again.",
+                app.config_path.display()
+            )
+        }
+        AddError::Io(e) => {
+            tracing::error!(error = %format!("{e:#}"), "couldn't add a repo to the config");
+            format!("Couldn’t add the repo: {e:#}")
+        }
+    }
+}
+
 async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Html<String> {
-    let base = endpoint_base(&headers, &uri);
+    render_list(&app, &AddForm::default(), &endpoint_base(&headers, &uri)).await
+}
+
+async fn render_list(app: &AppState, form: &AddForm, base: &str) -> Html<String> {
     let tracked: Vec<(Tracked, RepoState)> = {
         let overview = app.overview.lock().unwrap();
         overview
@@ -108,14 +208,15 @@ async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
 
     Html(
         layout(html! {
+            (add_form(form))
             @if cards.is_empty() {
                 section .card.empty {
                     (icon_archive())
                     h2 { "No repos tracked yet" }
                     p {
-                        "Add repo URLs to " code { "repos" } " in "
+                        "Add one above, or list repo URLs under " code { "repos" } " in "
                         code { (app.config_path.display()) }
-                        ". The app picks them up within a minute."
+                        ". The app picks up changes to the file within a minute."
                     }
                 }
             } @else {
@@ -126,7 +227,7 @@ async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
                     ul .repos {
                         @for (repo, state, inspection, archived) in &cards {
                             li {
-                                (repo_card(repo, state, inspection, archived.then_some(&*base), now))
+                                (repo_card(repo, state, inspection, archived.then_some(base), now))
                             }
                         }
                     }
@@ -135,6 +236,32 @@ async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
         })
         .into_string(),
     )
+}
+
+fn add_form(form: &AddForm) -> Markup {
+    let invalid = form.error.is_some();
+    html! {
+        section .card.add-repo {
+            form method="post" action="/repos" {
+                label for="repo-url" { "Repo URL" }
+                div .add-row {
+                    input #repo-url type="url" name="url" required
+                        placeholder="https://github.com/owner/repo"
+                        autocomplete="off" spellcheck="false"
+                        value=(form.url)
+                        aria-invalid=[invalid.then_some("true")]
+                        aria-describedby=[invalid.then_some("add-error")];
+                    button .button.primary type="submit" { "Add repo" }
+                }
+                @if let Some(error) = &form.error {
+                    p #add-error .form-error role="alert" {
+                        (icon_circle_alert())
+                        span { (error) }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn repo_card(
@@ -391,6 +518,14 @@ fn icon_ban() -> Markup {
 fn icon_refresh_cw_off() -> Markup {
     PreEscaped(
         r#"<svg class="icon icon-refresh-cw-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8L18.74 5.74A9.75 9.75 0 0 0 12 3C11 3 10.03 3.16 9.13 3.47"/><path d="M8 16H3v5"/><path d="M3 12C3 9.51 4 7.26 5.64 5.64"/><path d="m3 16 2.26 2.26A9.75 9.75 0 0 0 12 21c2.49 0 4.74-1 6.36-2.64"/><path d="M21 12c0 1-.16 1.97-.47 2.87"/><path d="M21 3v5h-5"/><path d="M22 22 2 2"/></svg>"#
+            .to_owned(),
+    )
+}
+
+/// Lucide `circle-alert`.
+fn icon_circle_alert() -> Markup {
+    PreEscaped(
+        r#"<svg class="icon icon-circle-alert" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>"#
             .to_owned(),
     )
 }

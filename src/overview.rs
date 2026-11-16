@@ -17,6 +17,9 @@ pub struct Overview {
     pub last_fetch_duration: Option<Duration>,
     /// Failed fetches since the app started.
     pub fetch_errors: FetchErrors,
+    /// Repos to fetch before any scheduled fetch, in order: repos added in
+    /// the UI that wait for their clone.
+    pub fetch_first: Vec<RepoId>,
 }
 
 #[derive(Debug, Default)]
@@ -46,6 +49,13 @@ pub struct Tracked {
 impl Overview {
     pub fn repo_state(&self, id: &RepoId) -> Option<&RepoState> {
         self.state.repos.get(id.as_str())
+    }
+
+    /// Queues a repo to fetch as soon as no other fetch is running. The
+    /// scheduler must be woken to notice.
+    pub fn jump_queue(&mut self, id: RepoId, now: SystemTime) {
+        self.fetch_first.push(id);
+        self.next_fetch = Some(now);
     }
 
     /// Each tracked repo with its state, if it has any yet.
