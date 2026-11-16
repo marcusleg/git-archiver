@@ -1,6 +1,6 @@
 # Config errors quote nothing the operator wrote
 
-A config error reaches the startup output, the log and the list page, and anyone who can open the list page can read it. Anything in the config may be a credential: a token pasted as a `hosts` key, a password in a repo URL, a token where a host belongs. So a config error is built only from text the app wrote, the names of its own settings, and toml's and serde's own words. Line and column say where the problem is, and a rejected `repos` entry is named by its position. It never quotes a URL, a host, a key or a value the operator wrote, not even one that looks harmless.
+A config error reaches the startup output, the log and the list page, and anyone who can open the list page can read it. Anything in the config may be a credential: a token pasted as a `hosts` key, a password in a repo URL, a token where a host belongs. So a config error is built only from text the app wrote, the names of its own settings, and, for a syntax error found before the file parses, toml's own words with anything it quotes hidden. Line and column say where the problem is, and a rejected `repos` entry is named by its position. It never quotes a URL, a host, a key or a value the operator wrote, not even one that looks harmless.
 
 ## Considered Options
 

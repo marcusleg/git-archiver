@@ -11,9 +11,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
-use serde::Deserialize;
 use toml::Spanned;
-use toml::de::DeTable;
+use toml::de::{DeTable, DeValue};
 use toml_edit::{Array, DocumentMut, RawString, Value};
 
 use crate::identity::RepoId;
@@ -28,17 +27,9 @@ pub struct Config {
     pub tokens: Tokens,
 }
 
-/// A host's settings. Each field's name is in [`APP_NAMES`] too.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostConfig {
-    token: Spanned<Token>,
-}
-
 /// An access token for one host. Its `Debug` output hides it, so it can't
 /// end up in a log by accident.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Token(String);
 
 impl Token {
@@ -80,29 +71,6 @@ impl Tokens {
     pub fn for_repo(&self, id: &RepoId) -> Option<&Token> {
         self.0.get(id.host())
     }
-}
-
-/// The config as written, with where each value the app checks itself sits,
-/// so that its error can say where. Each field's name is in [`APP_NAMES`] too.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawConfig {
-    #[serde(default = "default_interval")]
-    interval: Spanned<String>,
-    #[serde(default = "default_listen")]
-    listen: Spanned<String>,
-    #[serde(default)]
-    repos: Vec<Spanned<String>>,
-    #[serde(default)]
-    hosts: BTreeMap<Spanned<String>, HostConfig>,
-}
-
-fn default_interval() -> Spanned<String> {
-    Spanned::new(0..0, "24h".to_owned())
-}
-
-fn default_listen() -> Spanned<String> {
-    Spanned::new(0..0, "0.0.0.0:8080".to_owned())
 }
 
 pub fn file_path(data_dir: &Path) -> PathBuf {
@@ -157,8 +125,7 @@ fn parse(text: &str) -> anyhow::Result<Config> {
 /// The config a file's text holds, or the first error in it.
 fn check(text: &str) -> Result<Config, ConfigError> {
     let doc = DeTable::parse(text).map_err(|e| ConfigError::while_parsing(&e))?;
-    let raw = RawConfig::deserialize(toml::de::Deserializer::from(doc.clone()))
-        .map_err(|e| ConfigError::after_parsing(doc.get_ref(), &e))?;
+    let raw = read_settings(doc.get_ref())?;
     Ok(Config {
         interval: check_interval(&raw.interval)?,
         listen: raw.listen.get_ref().parse().map_err(|_| {
@@ -177,14 +144,129 @@ fn check(text: &str) -> Result<Config, ConfigError> {
     })
 }
 
+/// The names the app gives its settings, which an error may always show.
+/// This and [`HOST_FIELDS`] are the app's whole schema: [`read_settings`]
+/// accepts these names and no others.
+const SETTINGS: [&str; 4] = ["interval", "listen", "repos", "hosts"];
+
+/// The fields of a `hosts` entry.
+const HOST_FIELDS: [&str; 1] = ["token"];
+
+/// The config as written, with where each value the app checks itself sits,
+/// so that its error can say where.
+struct RawConfig {
+    interval: Spanned<String>,
+    listen: Spanned<String>,
+    repos: Vec<Spanned<String>>,
+    hosts: Vec<(Spanned<String>, Spanned<Token>)>,
+}
+
+type Entry<'a, 'de> = (
+    &'a Spanned<std::borrow::Cow<'de, str>>,
+    &'a Spanned<DeValue<'de>>,
+);
+
+/// The entries of `table` in file order.
+fn in_file_order<'a, 'de>(table: &'a DeTable<'de>) -> Vec<Entry<'a, 'de>> {
+    let mut entries: Vec<_> = table.iter().collect();
+    entries.sort_by_key(|(key, _)| key.span().start);
+    entries
+}
+
+/// Checks the parsed file against the app's schema: its settings, their
+/// types and the fields of each `hosts` entry. The first problem in the file
+/// is the error. Whatever it finds, it words itself.
+fn read_settings(root: &DeTable<'_>) -> Result<RawConfig, ConfigError> {
+    let mut interval = Spanned::new(0..0, "24h".to_owned());
+    let mut listen = Spanned::new(0..0, "0.0.0.0:8080".to_owned());
+    let mut repos = Vec::new();
+    let mut hosts = Vec::new();
+    for (key, value) in in_file_order(root) {
+        match key.get_ref().as_ref() {
+            "interval" => interval = string_at(value, &["interval"])?,
+            "listen" => listen = string_at(value, &["listen"])?,
+            "repos" => {
+                let DeValue::Array(entries) = value.get_ref() else {
+                    return Err(ConfigError::wrong_type(value, &["repos"], "a sequence"));
+                };
+                for entry in entries {
+                    repos.push(string_at(entry, &["repos"])?);
+                }
+            }
+            "hosts" => {
+                let DeValue::Table(entries) = value.get_ref() else {
+                    return Err(ConfigError::wrong_type(value, &["hosts"], "a map"));
+                };
+                for (host, settings) in in_file_order(entries) {
+                    hosts.push(read_host(host, settings)?);
+                }
+            }
+            name => return Err(ConfigError::unknown_field(key, &[name], &SETTINGS)),
+        }
+    }
+    Ok(RawConfig {
+        interval,
+        listen,
+        repos,
+        hosts,
+    })
+}
+
+/// A `hosts` entry: the host and its token.
+fn read_host(
+    host: &Spanned<std::borrow::Cow<'_, str>>,
+    settings: &Spanned<DeValue<'_>>,
+) -> Result<(Spanned<String>, Spanned<Token>), ConfigError> {
+    let name = host.get_ref().as_ref();
+    let DeValue::Table(fields) = settings.get_ref() else {
+        return Err(ConfigError::wrong_type(
+            settings,
+            &["hosts", name],
+            "struct HostConfig",
+        ));
+    };
+    let mut token = None;
+    for (field, value) in in_file_order(fields) {
+        match field.get_ref().as_ref() {
+            "token" => {
+                let text = string_at(value, &["hosts", name, "token"])?;
+                token = Some(Spanned::new(text.span(), Token(text.into_inner())));
+            }
+            other => {
+                return Err(ConfigError::unknown_field(
+                    field,
+                    &["hosts", name, other],
+                    &HOST_FIELDS,
+                ));
+            }
+        }
+    }
+    let Some(token) = token else {
+        return Err(ConfigError::at_key(
+            settings.span(),
+            &["hosts", name],
+            "missing field `token`".to_owned(),
+        ));
+    };
+    Ok((Spanned::new(host.span(), name.to_owned()), token))
+}
+
+/// The string at `value`, which is at `path`.
+fn string_at(value: &Spanned<DeValue<'_>>, path: &[&str]) -> Result<Spanned<String>, ConfigError> {
+    match value.get_ref() {
+        DeValue::String(text) => Ok(Spanned::new(value.span(), text.to_string())),
+        _ => Err(ConfigError::wrong_type(value, path, "a string")),
+    }
+}
+
 /// A config error, as only [`parse`] shows it: the line and column it starts
 /// at, the key it's about if that's known and may be shown, and the problem.
 struct ConfigError {
     span: Option<Range<usize>>,
     /// As [`shown_key`] shows it.
     key: Option<String>,
-    /// Text the app wrote, or toml's or serde's with [`hide_file_text`]
-    /// applied.
+    /// Text the app wrote, or for a syntax error toml's with
+    /// [`hide_file_text`] applied.
     problem: String,
 }
 
@@ -198,29 +280,67 @@ impl ConfigError {
         }
     }
 
+    /// A problem with the value at `span`, which is at `path`.
+    fn at_key(span: Range<usize>, path: &[&str], problem: String) -> Self {
+        Self {
+            span: Some(span),
+            key: shown_key(path),
+            problem,
+        }
+    }
+
     /// A syntax error, found before the file parsed. It names no key, as
     /// there is no parsed file to take one from, and a line that looks like
-    /// it sets one may well be inside a string.
+    /// it sets one may well be inside a string. It is the one error in toml's
+    /// words, with [`hide_file_text`] applied.
     fn while_parsing(error: &toml::de::Error) -> Self {
         Self {
             span: error.span(),
             key: None,
-            problem: hide_file_text(error.message(), None),
+            problem: hide_file_text(error.message()),
         }
     }
 
-    /// An error serde found in the parsed file `doc`, such as an unknown
-    /// field or a value of the wrong type, naming the key it's at.
-    fn after_parsing(doc: &DeTable<'_>, error: &toml::de::Error) -> Self {
-        let path = error.span().and_then(|span| key_at(doc, span.start));
-        Self {
-            span: error.span(),
-            key: path.as_deref().and_then(shown_key),
-            problem: hide_file_text(
-                error.message(),
-                path.as_deref().and_then(<[_]>::last).copied(),
-            ),
-        }
+    /// A key that isn't one of `known`, the last of `path`. It says what was
+    /// expected, but not what was found.
+    fn unknown_field(
+        key: &Spanned<std::borrow::Cow<'_, str>>,
+        path: &[&str],
+        known: &[&str],
+    ) -> Self {
+        let names: Vec<String> = known.iter().map(|name| format!("`{name}`")).collect();
+        let expected = match names.as_slice() {
+            [only] => only.clone(),
+            _ => format!("one of {}", names.join(", ")),
+        };
+        // The key is shown only if it is one of the app's names, such as
+        // `interval` written inside a `hosts` entry.
+        let shown = path.last().is_some_and(|name| is_app_name(name));
+        let found = if shown { path[path.len() - 1] } else { "…" };
+        Self::at_key(
+            key.span(),
+            path,
+            format!("unknown field `{found}`, expected {expected}"),
+        )
+    }
+
+    /// A value at `path` that isn't of the type the schema wants. It names
+    /// the type found, not the value.
+    fn wrong_type(value: &Spanned<DeValue<'_>>, path: &[&str], expected: &str) -> Self {
+        let found = match value.get_ref() {
+            DeValue::String(_) => "string \"…\"",
+            DeValue::Integer(_) => "integer `…`",
+            DeValue::Float(_) => "float `…`",
+            DeValue::Boolean(_) => "boolean `…`",
+            DeValue::Datetime(_) => "date and time `…`",
+            DeValue::Array(_) => "sequence",
+            DeValue::Table(_) => "map",
+        };
+        Self::at_key(
+            value.span(),
+            path,
+            format!("invalid type: {found}, expected {expected}"),
+        )
     }
 
     /// The error as the app shows it, such as
@@ -242,31 +362,6 @@ impl ConfigError {
     }
 }
 
-/// The keys leading to the deepest key or value in `table` that holds byte
-/// `at`, if any does.
-fn key_at<'a>(table: &'a DeTable<'_>, at: usize) -> Option<Vec<&'a str>> {
-    for (key, value) in table {
-        let name: &str = key.get_ref();
-        if key.span().contains(&at) {
-            return Some(vec![name]);
-        }
-        // A table's span may cover only its header, so its keys are
-        // searched whatever its span.
-        if let Some(mut inner) = value.get_ref().as_table().and_then(|t| key_at(t, at)) {
-            inner.insert(0, name);
-            return Some(inner);
-        }
-        if value.span().contains(&at) {
-            return Some(vec![name]);
-        }
-    }
-    None
-}
-
-/// The names the app gives its settings, which an error may always show:
-/// the fields of [`RawConfig`] and [`HostConfig`].
-const APP_NAMES: [&str; 5] = ["interval", "listen", "repos", "hosts", "token"];
-
 /// What toml's syntax errors quote in backticks, none of it from the file:
 /// exactly the literals toml_parser 1.1.5 can say it expected (its
 /// `Expected::Literal`s), which are punctuation, escape letters, number
@@ -276,6 +371,11 @@ const TOML_TOKENS: [&str; 30] = [
     "#", "'", ",", "-", "=", "[", "]", "]]", "{", "}", "_", "\\", "\"", "\"\"\"", "'''", "0b",
     "0o", "0x", "b", "e", "f", "n", "r", "u", "U", "x", "true", "false", "inf", "nan",
 ];
+
+/// Whether `name` is one the app gave a setting or a field.
+fn is_app_name(name: &str) -> bool {
+    SETTINGS.contains(&name) || HOST_FIELDS.contains(&name)
+}
 
 /// A key as an error may show it, such as `hosts.….token`: each part that is
 /// one of the app's own names, and `…` for any other part, which may be a
@@ -288,7 +388,7 @@ fn shown_key(path: &[&str]) -> Option<String> {
         .map(|(i, &part)| {
             // A `hosts` key is a host, whatever it's called.
             let is_host = i == 1 && path[0] == "hosts";
-            let shown = !is_host && APP_NAMES.contains(&part);
+            let shown = !is_host && is_app_name(part);
             any_shown |= shown;
             if shown { part } else { "…" }
         })
@@ -296,20 +396,10 @@ fn shown_key(path: &[&str]) -> Option<String> {
     any_shown.then(|| parts.join("."))
 }
 
-/// toml's or serde's problem text with every piece it quotes from the file
-/// shown as `…`: each double-quoted string, which serde writes with Rust's
-/// escapes, and each backtick-quoted piece other than [`APP_NAMES`] and
-/// [`TOML_TOKENS`]. serde quotes an unknown field in backticks without
-/// escaping it, so `last_key`, the last key leading to where the error is,
-/// is hidden first if it holds a backtick, which would end it early. Any
-/// other key is hidden or shown like every other piece, so an error may
-/// quote an app name that is also its key, as in ``missing field `token` ``
-/// for `[hosts."token"]`.
-fn hide_file_text(message: &str, last_key: Option<&str>) -> String {
-    let message = match last_key {
-        Some(key) if key.contains('`') => message.replacen(&format!("`{key}`"), "`…`", 1),
-        _ => message.to_owned(),
-    };
+/// toml's syntax error text with every piece it quotes from the file shown
+/// as `…`: each double-quoted string, and each backtick-quoted piece other
+/// than [`TOML_TOKENS`].
+fn hide_file_text(message: &str) -> String {
     let mut shown = String::new();
     let mut rest = message.trim();
     while let Some(open) = rest.find(['"', '`']) {
@@ -322,7 +412,7 @@ fn hide_file_text(message: &str, last_key: Option<&str>) -> String {
             quoted.find('`')
         };
         let piece = &quoted[..end.unwrap_or(quoted.len())];
-        if quote == "`" && (APP_NAMES.contains(&piece) || TOML_TOKENS.contains(&piece)) {
+        if quote == "`" && TOML_TOKENS.contains(&piece) {
             shown.push_str(&format!("`{piece}`"));
         } else {
             shown.push_str(&format!("{quote}…{quote}"));
@@ -333,7 +423,7 @@ fn hide_file_text(message: &str, last_key: Option<&str>) -> String {
     shown
 }
 
-/// Where the string serde wrote ends: at the first `"` no `\` escapes.
+/// Where the string toml wrote ends: at the first `"` no `\` escapes.
 /// None if it never ends.
 fn string_end(quoted: &str) -> Option<usize> {
     let mut escaped = false;
@@ -753,10 +843,7 @@ fn is_host(key: &str) -> bool {
 /// The tokens by host, if every `hosts` key is a host, listed once, with a
 /// well-formed token. An error never names the host: its line and column
 /// say which.
-fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, ConfigError> {
-    let mut hosts: Vec<_> = hosts.into_iter().collect();
-    // In file order, so a host listed twice is reported where it repeats.
-    hosts.sort_by_key(|(host, _)| host.span().start);
+fn check_hosts(hosts: Vec<(Spanned<String>, Spanned<Token>)>) -> Result<Tokens, ConfigError> {
     let mut tokens = BTreeMap::new();
     for (host, settings) in hosts {
         if !is_host(host.get_ref()) {
@@ -766,18 +853,15 @@ fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, C
                  with a port if the repo URLs name one",
             ));
         }
-        if settings.token.get_ref().is_malformed() {
+        if settings.get_ref().is_malformed() {
             return Err(ConfigError::at(
-                &settings.token,
+                &settings,
                 "`hosts.….token` must not be empty or contain spaces, \
                  line breaks or control characters",
             ));
         }
         let lowercased = host.get_ref().to_ascii_lowercase();
-        if tokens
-            .insert(lowercased, settings.token.into_inner())
-            .is_some()
-        {
+        if tokens.insert(lowercased, settings.into_inner()).is_some() {
             return Err(ConfigError::at(
                 &host,
                 "`hosts` lists a host more than once (host names ignore case)",
