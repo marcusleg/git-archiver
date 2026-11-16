@@ -130,6 +130,11 @@ impl Archives {
         }
     }
 
+    /// The `repos/` directory every archive lives under.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn path(&self, id: &RepoId) -> PathBuf {
         self.root.join(id.archive_path())
     }
@@ -358,7 +363,7 @@ async fn git_with_input(dir: &Path, args: &[&str], input: &str) -> anyhow::Resul
 
 /// A git command isolated from the user's and system's git config and from
 /// any `GIT_*` variables in our environment, which never prompts.
-fn command(dir: &Path, args: &[&str]) -> Command {
+pub(crate) fn command(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("GIT_") {

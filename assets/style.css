@@ -273,6 +273,58 @@ main {
   margin: 0;
 }
 
+/* Clone line: the command in mono on `bg`, with a copy button */
+
+.clone-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+}
+
+.clone-line code {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  user-select: all;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--primary);
+  cursor: pointer;
+  transition: color 200ms;
+}
+
+.icon-button:hover {
+  color: var(--fg);
+}
+
+.icon-button .icon-check,
+.icon-button.copied .icon-copy {
+  display: none;
+}
+
+.icon-button.copied .icon-check {
+  display: block;
+  color: var(--accent-green);
+}
+
 /* Empty state */
 
 .empty {

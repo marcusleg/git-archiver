@@ -6,14 +6,15 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use axum::Router;
-use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use crate::archive::{Archives, Inspection};
 use crate::clock::Clock;
+use crate::git_http;
 use crate::metrics;
 use crate::overview::{SharedOverview, Tracked};
 use crate::state::{RepoState, Status};
@@ -48,6 +49,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_page))
         .route("/metrics", get(metrics))
+        .route("/git/{*path}", any(git))
         .route("/assets/style.css", get(stylesheet))
         .route("/assets/fonts/{name}", get(font))
         .with_state(state)
@@ -56,6 +58,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     let body = metrics::render(&state.overview.lock().unwrap());
     ([(header::CONTENT_TYPE, metrics::CONTENT_TYPE)], body).into_response()
+}
+
+async fn git(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    git_http::serve(state.archives.root(), request).await
 }
 
 async fn stylesheet() -> Response {
@@ -80,7 +86,8 @@ fn asset(content_type: &'static str, body: &'static [u8]) -> Response {
         .into_response()
 }
 
-async fn list_page(State(app): State<Arc<AppState>>) -> Html<String> {
+async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Html<String> {
+    let base = endpoint_base(&headers, &uri);
     let tracked: Vec<(Tracked, RepoState)> = {
         let overview = app.overview.lock().unwrap();
         overview
@@ -117,7 +124,7 @@ async fn list_page(State(app): State<Arc<AppState>>) -> Html<String> {
                     }
                     ul .repos {
                         @for (repo, state, inspection) in &cards {
-                            li { (repo_card(repo, state, inspection, now)) }
+                            li { (repo_card(repo, state, inspection, &base, now)) }
                         }
                     }
                 }
@@ -131,8 +138,14 @@ fn repo_card(
     repo: &Tracked,
     state: &RepoState,
     inspection: &Inspection,
+    base: &str,
     now: SystemTime,
 ) -> Markup {
+    let clone = format!(
+        "git clone {base}{}{}.git",
+        git_http::PREFIX,
+        repo.id.host_and_path()
+    );
     let fetched = state.status == Some(Status::Available);
     html! {
         article .card {
@@ -208,6 +221,14 @@ fn repo_card(
                     }
                 }
             }
+            div .clone-line {
+                code .clone { (clone) }
+                button .icon-button type="button" data-copy=(clone)
+                    aria-label="Copy clone command" title="Copy" {
+                    (icon_copy())
+                    (icon_check())
+                }
+            }
         }
     }
 }
@@ -231,6 +252,17 @@ fn date(at: SystemTime) -> Markup {
     ][month.parse::<usize>().expect("RFC 3339 has a month") - 1];
     let day = day.trim_start_matches('0');
     time_element(at, &format!("{day} {month} {year}"))
+}
+
+/// `http://<host>[:<port>]` as the browser reached the app, which is how
+/// git clients reach the git endpoint too.
+fn endpoint_base(headers: &HeaderMap, uri: &Uri) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| uri.authority().map(|a| a.as_str()))
+        .unwrap_or("localhost");
+    format!("http://{host}")
 }
 
 /// A `<time>` showing how long ago `then` was, with the exact UTC time on
@@ -296,10 +328,34 @@ fn layout(content: Markup) -> Markup {
                     a .brand href="/" { "Git Archiver" }
                 }
                 main { (content) }
+                script { (PreEscaped(COPY_SCRIPT)) }
             }
         }
     }
 }
+
+/// Copies a `data-copy` button's text. The clipboard API needs a secure
+/// context, which a plain-HTTP server on another host isn't, so it falls
+/// back to selecting the text and copying the selection.
+const COPY_SCRIPT: &str = r#"
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-copy]");
+  if (!button) return;
+  const copied = () => {
+    button.classList.add("copied");
+    setTimeout(() => button.classList.remove("copied"), 1500);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(button.dataset.copy).then(copied);
+    return;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(button.previousElementSibling);
+  getSelection().removeAllRanges();
+  getSelection().addRange(range);
+  if (document.execCommand("copy")) copied();
+});
+"#;
 
 /// Lucide `archive`.
 fn icon_archive() -> Markup {
@@ -337,6 +393,22 @@ fn icon_refresh_cw_off() -> Markup {
 fn icon_clock() -> Markup {
     PreEscaped(
         r#"<svg class="icon icon-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>"#
+            .to_owned(),
+    )
+}
+
+/// Lucide `copy`.
+fn icon_copy() -> Markup {
+    PreEscaped(
+        r#"<svg class="icon icon-copy" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>"#
+            .to_owned(),
+    )
+}
+
+/// Lucide `check`, shown briefly after copying.
+fn icon_check() -> Markup {
+    PreEscaped(
+        r#"<svg class="icon icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>"#
             .to_owned(),
     )
 }

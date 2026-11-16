@@ -52,6 +52,12 @@ impl RepoId {
         &self.id
     }
 
+    /// `<host>[:<port>]/<path>`, as in the archive's path and its git
+    /// endpoint URL.
+    pub fn host_and_path(&self) -> &str {
+        &self.host_and_path
+    }
+
     /// Where the archive lives, relative to `repos/`.
     pub fn archive_path(&self) -> PathBuf {
         PathBuf::from(format!("{}.git", self.host_and_path))
