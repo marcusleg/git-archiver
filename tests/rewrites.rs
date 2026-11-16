@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::forge::FakeForge;
+use common::forge::{FakeForge, Upstream};
 use common::git::{commit_of, git, refs};
 use common::{HOUR, TestApp};
 
@@ -12,6 +12,16 @@ use common::{HOUR, TestApp};
 /// another day on.
 const SECOND_FETCH: &str = "20261118T120000Z";
 const THIRD_FETCH: &str = "20261119T120000Z";
+
+/// Brings upstream's state into the archive's staging namespace with plain
+/// `git`, as a fetch does before it applies anything. Fetches from the served
+/// repo on disk: a blocking `git` call over HTTP would deadlock the forge,
+/// which runs on the test's thread.
+fn stage_by_hand(archive: &std::path::Path, upstream: &Upstream, refspecs: &[&str]) {
+    let mut args = vec!["fetch", "--quiet", "--no-tags", upstream.served_path()];
+    args.extend(refspecs);
+    git(archive, &args);
+}
 
 fn names(refs: &std::collections::BTreeMap<String, String>) -> Vec<&str> {
     refs.keys().map(String::as_str).collect()
@@ -177,13 +187,10 @@ async fn a_fetch_interrupted_after_staging_loses_nothing_when_fetched_again() {
     upstream.force_push_new_history("rewritten");
     upstream.move_tag("moved");
     upstream.delete_tag("deleted");
-    git(
+    stage_by_hand(
         &archive,
+        &upstream,
         &[
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            upstream.served_path(),
             "+refs/heads/main:refs/staging/heads/main",
             "+refs/tags/*:refs/staging/tags/*",
         ],
@@ -216,7 +223,7 @@ async fn a_fetch_interrupted_after_staging_loses_nothing_when_fetched_again() {
 }
 
 #[tokio::test]
-async fn a_default_branch_switch_interrupted_before_head_moved_completes_on_the_next_fetch() {
+async fn a_default_branch_switch_interrupted_after_preserving_completes_on_the_next_fetch() {
     let forge = FakeForge::start().await;
     let upstream = forge.create_repo_with_default_branch("foo/bar", "master");
     let old = upstream.commit("first");
@@ -224,29 +231,74 @@ async fn a_default_branch_switch_interrupted_before_head_moved_completes_on_the_
     app.advance_and_settle(24 * HOUR).await;
     let archive = app.archive(&format!("{}/foo/bar", forge.host()));
 
-    // A fetch that died with the new default branch staged and `HEAD`
-    // already pointing at it, the old branch not yet preserved.
+    // A fetch that died after preserving the old branch and pointing `HEAD`
+    // at the new one, before moving any archived ref.
     upstream.switch_default_branch("main");
     let new = upstream.commit("second");
-    git(
+    stage_by_hand(
         &archive,
-        &[
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            upstream.served_path(),
-            "+refs/heads/main:refs/staging/heads/main",
-        ],
+        &upstream,
+        &["+refs/heads/main:refs/staging/heads/main"],
     );
+    let interrupted = "refs/preserved/20261117T180000Z/heads/master";
+    git(&archive, &["update-ref", interrupted, &old]);
     git(&archive, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     app.advance_and_settle(24 * HOUR).await;
 
+    // The retry preserves the old tip again, under its own time.
     let refs = refs(&archive);
-    let preserved = format!("refs/preserved/{SECOND_FETCH}/heads/master");
-    assert_eq!(names(&refs), ["refs/heads/main", preserved.as_str()]);
-    assert_eq!(refs[&preserved], old);
+    let retried = format!("refs/preserved/{SECOND_FETCH}/heads/master");
+    assert_eq!(
+        names(&refs),
+        ["refs/heads/main", interrupted, retried.as_str()]
+    );
+    assert_eq!(refs[interrupted], old);
+    assert_eq!(refs[&retried], old);
     assert_eq!(refs["refs/heads/main"], new);
     assert_eq!(git(&archive, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+}
+
+#[tokio::test]
+async fn a_tag_replaced_by_one_nested_under_its_name_is_preserved_and_the_new_one_archived() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/bar");
+    upstream.commit("first");
+    upstream.tag("v1");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    let old = refs(&archive)["refs/tags/v1"].clone();
+
+    upstream.delete_tag("v1");
+    upstream.tag("v1/rc");
+    app.advance_and_settle(24 * HOUR).await;
+
+    let refs = refs(&archive);
+    let preserved = format!("refs/preserved/{SECOND_FETCH}/tags/v1");
+    assert_eq!(
+        names(&refs),
+        ["refs/heads/main", preserved.as_str(), "refs/tags/v1/rc"]
+    );
+    assert_eq!(refs[&preserved], old);
+}
+
+#[tokio::test]
+async fn a_default_branch_deleted_upstream_is_preserved_like_any_other_lost_ref() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/bar");
+    let tip = upstream.commit("first");
+    upstream.tag("v1");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+
+    upstream.delete_default_branch();
+    app.advance_and_settle(24 * HOUR).await;
+
+    let refs = refs(&archive);
+    let preserved = format!("refs/preserved/{SECOND_FETCH}/heads/main");
+    assert_eq!(names(&refs), [preserved.as_str(), "refs/tags/v1"]);
+    assert_eq!(refs[&preserved], tip);
 }
 
 #[tokio::test]

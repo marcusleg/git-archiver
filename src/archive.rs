@@ -2,12 +2,12 @@
 //! created and updated only through the `git` CLI (ADR-0001).
 //!
 //! A fetch works in two steps. It first brings upstream's default branch and
-//! tags into a staging namespace inside the archive. Then, in one ref
-//! transaction, it keeps every archived tip a rewrite would lose as a
-//! preserved ref (ADR-0002), moves the archived refs to the staged state and
-//! clears staging. A fetch interrupted before that transaction leaves only
-//! staging refs behind, which the next fetch clears first; the transaction
-//! itself applies whole or not at all.
+//! tags into a staging namespace inside the archive. Then it keeps every
+//! archived tip a rewrite would lose as a preserved ref (ADR-0002), and only
+//! after that moves the archived refs to the staged state and clears staging.
+//! A fetch interrupted at any point has lost nothing: the next one clears the
+//! leftover staging refs, finds the same rewrite and finishes it, preserving
+//! the same tips again under its own time if the first got that far.
 //!
 //! A failed fetch is classified from git's exit and stderr alone (ADR-0001):
 //! upstream refusing the repo makes it Unavailable, anything else is a
@@ -198,12 +198,15 @@ impl Archives {
             .iter()
             .map(|(name, sha)| (format!("refs/{}", &name[STAGING.len()..]), sha.as_str()))
             .collect();
-        let default_ref = default_branch.as_ref().map(|b| format!("refs/heads/{b}"));
         let stamp = ref_timestamp(now);
 
-        // One transaction: preserved refs, archived refs and clearing staging
-        // all happen, or none do.
-        let mut transaction = String::new();
+        // Each step below is its own ref transaction, because the files ref
+        // backend commits a transaction one ref at a time. In this order, a
+        // fetch that dies between or during any of them has preserved every
+        // tip it was about to lose, and the next fetch finishes the job.
+        let mut preserve = String::new();
+        let mut delete = String::new();
+        let mut update = String::new();
         let mut preserved = Vec::new();
         for (name, old) in &archived {
             let new = upstream.get(name).copied();
@@ -212,35 +215,43 @@ impl Archives {
                 Some(new) if name.starts_with("refs/heads/") => {
                     !is_ancestor(&archive, old, new).await?
                 }
-                // The default branch moved away from this branch. Upstream
-                // with no commits advertises no default branch; its branches
-                // stay as they are.
-                None if name.starts_with("refs/heads/") && default_ref.is_none() => continue,
+                // Gone upstream, or a branch that is no longer the default.
                 _ => true,
             };
             if rewritten {
-                let keep = format!("{PRESERVED}{stamp}/{}", &name["refs/".len()..]);
-                transaction.push_str(&format!("create {keep} {old}\n"));
-                preserved.push(keep);
+                let preserved_ref = format!("{PRESERVED}{stamp}/{}", &name["refs/".len()..]);
+                preserve.push_str(&format!("create {preserved_ref} {old}\n"));
+                preserved.push(preserved_ref);
             }
             match new {
-                Some(new) => transaction.push_str(&format!("update {name} {new} {old}\n")),
-                None => transaction.push_str(&format!("delete {name} {old}\n")),
+                Some(new) => update.push_str(&format!("update {name} {new} {old}\n")),
+                None => delete.push_str(&format!("delete {name} {old}\n")),
             }
         }
         for (name, new) in &upstream {
             if !archived.contains_key(name) {
-                transaction.push_str(&format!("create {name} {new}\n"));
+                update.push_str(&format!("create {name} {new}\n"));
             }
         }
         for (name, sha) in &staged {
-            transaction.push_str(&format!("delete {name} {sha}\n"));
+            update.push_str(&format!("delete {name} {sha}\n"));
         }
-        git_with_input(&archive, &["update-ref", "--stdin"], &transaction).await?;
 
-        if let Some(default_ref) = &default_ref {
-            git(&archive, &["symbolic-ref", "HEAD", default_ref]).await?;
+        // 1. Keep what the rewrite would lose.
+        git_with_input(&archive, &["update-ref", "--stdin"], &preserve).await?;
+        // 2. Follow upstream's default branch, even before it exists here.
+        if let Some(branch) = &default_branch {
+            git(
+                &archive,
+                &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
+            )
+            .await?;
         }
+        // 3. Remove refs gone upstream first, so a new ref may take a name
+        //    nested under a deleted one (tag `v1` replaced by `v1/rc`).
+        git_with_input(&archive, &["update-ref", "--stdin"], &delete).await?;
+        // 4. Take upstream's state and clear staging.
+        git_with_input(&archive, &["update-ref", "--stdin"], &update).await?;
         Ok(preserved)
     }
 
@@ -251,7 +262,7 @@ impl Archives {
         if !archive.exists() {
             return Ok(Inspection::default());
         }
-        let preserved = Some(list_refs(&archive, &[PRESERVED]).await?);
+        let preserved = self.preserved(id).await?;
         let head = git(&archive, &["symbolic-ref", "HEAD"]).await?;
         let head = head.trim();
         let Some(tip) = rev_parse(&archive, head).await? else {

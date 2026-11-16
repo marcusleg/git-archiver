@@ -242,11 +242,20 @@ impl Upstream {
         );
     }
 
+    /// Deletes the default branch upstream, leaving its `HEAD` pointing at
+    /// nothing, so upstream advertises no default branch.
+    pub fn delete_default_branch(&self) {
+        let head = git(&self.bare, &["symbolic-ref", "HEAD"]);
+        git(&self.bare, &["update-ref", "-d", &head]);
+    }
+
+    /// Deletes a tag upstream and in the working copy.
     pub fn delete_tag(&self, name: &str) {
         git(
             &self.work,
             &["push", "-q", "origin", &format!(":refs/tags/{name}")],
         );
+        git(&self.work, &["tag", "-d", name]);
     }
 }
 
