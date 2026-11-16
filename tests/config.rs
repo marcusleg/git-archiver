@@ -95,3 +95,34 @@ async fn an_invalid_config_fails_startup_naming_the_problem() {
         assert!(error.contains("invalid config"), "{error}");
     }
 }
+
+#[tokio::test]
+async fn a_rejected_repo_url_is_named_without_its_credentials() {
+    let cases = [
+        (
+            "https://user:secretpw@example.com/foo/bar",
+            "\"https://…@example.com/foo/bar\" must not contain credentials",
+        ),
+        (
+            "https://user:secretpw@example.com:99999/foo/bar",
+            "\"https://…@example.com:99999/foo/bar\" is not a valid URL",
+        ),
+        (
+            "https://user:12345#secretpw@example.com/foo/bar",
+            "\"https://…@example.com/foo/bar\" has no repository path",
+        ),
+        (
+            "ftp://user:secretpw@example.com/foo/bar",
+            "\"ftp://…@example.com/foo/bar\" must be an http:// or https:// URL",
+        ),
+        (
+            "user:secretpw@example.com/foo/bar",
+            "\"…@example.com/foo/bar\" must be an http:// or https:// URL",
+        ),
+    ];
+    for (url, expected) in cases {
+        let error = TestApp::start_error(&format!("repos = [\"{url}\"]")).await;
+        assert!(error.contains(expected), "{url:?}: {error}");
+        assert!(!error.contains("secretpw"), "{url:?}: {error}");
+    }
+}

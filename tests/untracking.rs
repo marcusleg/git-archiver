@@ -322,6 +322,35 @@ async fn the_config_warning_never_quotes_the_file() {
 }
 
 #[tokio::test]
+async fn the_config_warning_names_a_repo_url_with_credentials_without_showing_them() {
+    let logs = common::logs::capture();
+    let good = "https://example.com/good/repo";
+    let app = TestApp::tracking(&[good]).await;
+
+    app.write_config(&config_tracking(&[
+        good,
+        "https://user:secretpw@example.com/foo/bar",
+    ]));
+    app.advance_and_settle(MINUTE).await;
+
+    let banner = config_banner(&app).await.expect("a warning banner");
+    assert!(
+        banner.contains("must not contain credentials"),
+        "why: {banner}"
+    );
+    assert!(
+        banner.contains("example.com/foo/bar"),
+        "which repo: {banner}"
+    );
+    let page = app.get("/").await.text();
+    assert!(!page.contains("secretpw"), "{page}");
+    let logged = logs.lines().join("\n");
+    assert!(logged.contains("must not contain credentials"), "{logged}");
+    assert!(!logged.contains("secretpw"), "{logged}");
+    assert_eq!(tracked(&app).await, [good], "keeps the last good repo list");
+}
+
+#[tokio::test]
 async fn metrics_flag_tracked_repos_and_keep_reporting_untracked_archives() {
     let (forge, upstream) = forge_with("foo/bar").await;
     let never = "https://example.com/never/fetched";
