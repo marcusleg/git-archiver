@@ -168,6 +168,52 @@ async fn a_rejected_hosts_key_is_named_without_its_credentials() {
 }
 
 #[tokio::test]
+async fn a_key_is_named_without_its_credentials_whatever_escapes_it_uses() {
+    let cases = [
+        (
+            "[hosts]\n\"https://user:secretpw\\u0040github.com\" = \"ghp_x\"",
+            "line 2 (`\"https://…@github.com\"`), column 43: invalid type",
+        ),
+        (
+            "[hosts]\n\"https://user:secretpw\\U00000040github.com\" = \"ghp_x\"",
+            "line 2 (`\"https://…@github.com\"`), column 47: invalid type",
+        ),
+        (
+            "[hosts]\n\"https://user:secret\\u0070w@github.com\" = \"ghp_x\"",
+            "line 2 (`\"https://…@github.com\"`)",
+        ),
+        (
+            "[hosts]\n\"https://user\\u003asecretpw@github.com\" = \"ghp_x\"",
+            "line 2 (`\"https://…@github.com\"`)",
+        ),
+        (
+            "[hosts]\n\"https\\u003a//user:secretpw\\u0040github.com\" = \"ghp_x\"",
+            "line 2 (`\"https://…@github.com\"`)",
+        ),
+        (
+            "hosts.\"https://user:secretpw\\u0040github.com\".token = 5",
+            "line 1 (`hosts.\"https://…@github.com\".token`)",
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw\\u0040github.com\" = \"x\"",
+            "line 3 (`\"https://…@github.com\"`), column 1: \
+             unknown field `https://…@github.com`, expected `token`",
+        ),
+        // A key toml can't read is named by its place alone.
+        (
+            "[hosts]\n\"https://user:secretpw\\q\\u0040github.com\" = \"x\"",
+            "line 2, column ",
+        ),
+    ];
+    for (config, expected) in cases {
+        let error = TestApp::start_error(config).await;
+        assert!(error.contains(expected), "{config:?}: {error}");
+        assert!(!error.contains("secretpw"), "{config:?}: {error}");
+        assert!(!error.contains("user:"), "{config:?}: {error}");
+    }
+}
+
+#[tokio::test]
 async fn an_unknown_field_is_named_without_its_credentials() {
     let cases = [
         (

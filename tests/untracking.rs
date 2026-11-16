@@ -438,6 +438,38 @@ async fn the_config_warning_names_an_unknown_field_with_credentials_without_show
 }
 
 #[tokio::test]
+async fn the_config_warning_names_a_key_with_an_escaped_at_without_showing_its_credentials() {
+    let tables = [
+        (
+            "[hosts]\n\"https://user:secretpw\\u0040github.com\" = \"ghp_x\"\n",
+            "invalid type",
+        ),
+        (
+            "[hosts.\"github.com\"]\ntoken = \"a\"\n\"https://user:secretpw\\u0040github.com\" = \"x\"\n",
+            "unknown field `https://…@github.com`, expected `token`",
+        ),
+    ];
+    for (table, expected) in tables {
+        let CredentialsWarning {
+            banner,
+            page,
+            logged,
+        } = write_config_with_credentials(&format!(
+            "{}\n{table}",
+            config_tracking(&[GOOD_REPO, "https://example.com/new/repo"]),
+        ))
+        .await;
+
+        assert!(banner.contains("line "), "where: {banner}");
+        assert!(banner.contains("column "), "where: {banner}");
+        assert!(banner.contains(expected), "what: {banner}");
+        assert!(!page.contains("user:"), "{page}");
+        assert!(logged.contains(expected), "{logged}");
+        assert!(!logged.contains("user:"), "{logged}");
+    }
+}
+
+#[tokio::test]
 async fn the_config_warning_names_a_repo_url_with_credentials_without_showing_them() {
     let CredentialsWarning { banner, logged, .. } =
         write_config_with_credentials(&config_tracking(&[
