@@ -29,7 +29,7 @@ async fn three_repos_in_a_24h_interval_are_fetched_one_every_8_hours_oldest_firs
     assert_eq!(last_successes(&app, &ids).await, [h(32), h(16), h(24)]);
 
     let next = app.next_fetch().await;
-    assert_eq!(next, h(40).map(|t| t as f64));
+    assert_eq!(next, h(40));
 }
 
 #[tokio::test]
@@ -48,7 +48,7 @@ async fn restarting_with_a_fetch_overdue_runs_just_that_fetch_right_away() {
 
     assert_eq!(last_successes(&app, &ids).await, [h(8), h(28), None]);
     let next = app.next_fetch().await;
-    assert_eq!(next, h(36).map(|t| t as f64));
+    assert_eq!(next, h(36));
 }
 
 #[tokio::test]
@@ -66,7 +66,7 @@ async fn restarting_with_nothing_overdue_fetches_nothing_until_the_next_due_time
     app.settle().await;
     assert_eq!(last_successes(&app, &ids).await, [h(8), None, None]);
     let next = app.next_fetch().await;
-    assert_eq!(next, h(16).map(|t| t as f64), "due from the saved state");
+    assert_eq!(next, h(16), "due from the saved state");
 
     app.advance_and_settle(3 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [h(8), None, None]);
@@ -93,7 +93,7 @@ async fn a_repo_added_to_the_config_by_hand_is_fetched_from_the_next_fetch_on_an
     // config order.
     assert_eq!(last_successes(&app, &ids).await, [h(12), h(20), None]);
     let next = app.next_fetch().await;
-    assert_eq!(next, h(28).map(|t| t as f64));
+    assert_eq!(next, h(28));
 
     app.advance_and_settle(8 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [h(12), h(20), h(28)]);
@@ -109,21 +109,13 @@ async fn a_repo_untracked_by_hand_widens_the_gap_from_the_next_fetch_on() {
     app.advance_and_settle(8 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [h(8), None, None]);
     let next = app.next_fetch().await;
-    assert_eq!(
-        next,
-        h(16).map(|t| t as f64),
-        "24h / 3 after the last attempt"
-    );
+    assert_eq!(next, h(16), "24h / 3 after the last attempt");
 
     app.write_config(&config_tracking(&urls(&repos[..2])));
     app.advance_and_settle(MINUTE).await;
 
     let next = app.next_fetch().await;
-    assert_eq!(
-        next,
-        h(20).map(|t| t as f64),
-        "24h / 2 after the last attempt"
-    );
+    assert_eq!(next, h(20), "24h / 2 after the last attempt");
 
     app.advance_and_settle(12 * HOUR - MINUTE).await;
     assert_eq!(last_successes(&app, &ids).await, [h(8), h(20), None]);
@@ -146,7 +138,7 @@ async fn a_failed_fetch_counts_as_an_attempt_and_the_next_repo_still_gets_its_tu
     app.advance_and_settle(12 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [None, None]);
     let next = app.next_fetch().await;
-    assert_eq!(next, h(24).map(|t| t as f64), "the failure was an attempt");
+    assert_eq!(next, h(24), "the failure was an attempt");
 
     app.advance_and_settle(12 * HOUR).await;
     assert_eq!(last_successes(&app, &ids).await, [None, h(24)]);
@@ -170,7 +162,7 @@ async fn a_fetch_that_hangs_is_stopped_after_an_hour_and_counts_as_an_attempt() 
     assert_eq!(metrics.last_success(&id), None);
     assert_eq!(
         metrics.next_fetch(),
-        Some((start + 48 * 3600) as f64),
+        Some(start + 48 * 3600),
         "the attempt at 24h counts"
     );
 }

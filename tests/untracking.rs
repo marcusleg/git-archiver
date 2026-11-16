@@ -158,7 +158,7 @@ async fn untracking_a_repo_widens_the_gap_from_the_next_fetch_on() {
     assert_eq!(last_successes(&app, &ids).await, [h(8), None, None]);
     assert_eq!(
         app.next_fetch().await,
-        h(16).map(|t| t as f64),
+        h(16),
         "24h / 3 after the last attempt"
     );
 
@@ -168,7 +168,7 @@ async fn untracking_a_repo_widens_the_gap_from_the_next_fetch_on() {
 
     assert_eq!(
         app.next_fetch().await,
-        h(20).map(|t| t as f64),
+        h(20),
         "24h / 2 after the last attempt"
     );
     app.advance_and_settle(12 * HOUR - MINUTE).await;
@@ -344,45 +344,71 @@ async fn the_config_warning_never_quotes_the_file() {
     assert!(!banner.contains("ghp_secret"), "{banner}");
 }
 
-#[tokio::test]
-async fn the_config_warning_names_a_hosts_key_with_credentials_without_showing_them() {
-    let logs = common::logs::capture();
-    let good = "https://example.com/good/repo";
-    let app = TestApp::tracking(&[good]).await;
+const GOOD_REPO: &str = "https://example.com/good/repo";
 
-    app.write_config(&format!(
-        "{}\n[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"x\"\n",
-        config_tracking(&[good, "https://example.com/new/repo"]),
-    ));
+/// What a config warning about credentials shows, for the checks one test
+/// makes on its own.
+struct CredentialsWarning {
+    banner: String,
+    page: String,
+    logged: String,
+}
+
+/// Tracks [`GOOD_REPO`], then writes `bad_config`, which holds the password
+/// `secretpw`. Checks what every such warning shares: a banner shows, the
+/// page and the log never show `secretpw`, and the last good repo list stays.
+async fn credentials_warning(bad_config: &str) -> CredentialsWarning {
+    let logs = common::logs::capture();
+    let app = TestApp::tracking(&[GOOD_REPO]).await;
+
+    app.write_config(bad_config);
     app.advance_and_settle(MINUTE).await;
 
     let banner = config_banner(&app).await.expect("a warning banner");
+    let page = app.get("/").await.text();
+    assert!(!page.contains("secretpw"), "{page}");
+    let logged = logs.lines().join("\n");
+    assert!(!logged.contains("secretpw"), "{logged}");
+    assert_eq!(
+        tracked(&app).await,
+        [GOOD_REPO],
+        "keeps the last good repo list"
+    );
+    CredentialsWarning {
+        banner,
+        page,
+        logged,
+    }
+}
+
+#[tokio::test]
+async fn the_config_warning_names_a_hosts_key_with_credentials_without_showing_them() {
+    let CredentialsWarning {
+        banner,
+        page,
+        logged,
+    } = credentials_warning(&format!(
+        "{}\n[hosts.\"https://user:secretpw@github.com\"]\ntoken = \"x\"\n",
+        config_tracking(&[GOOD_REPO, "https://example.com/new/repo"]),
+    ))
+    .await;
+
     assert!(banner.contains("`hosts` key"), "which setting: {banner}");
     assert!(banner.contains("github.com"), "which key: {banner}");
     assert!(banner.contains("must be a host"), "why: {banner}");
-    let page = app.get("/").await.text();
-    assert!(!page.contains("secretpw"), "{page}");
     assert!(!page.contains("user:"), "{page}");
-    let logged = logs.lines().join("\n");
     assert!(logged.contains("must be a host"), "{logged}");
-    assert!(!logged.contains("secretpw"), "{logged}");
     assert!(!logged.contains("user:"), "{logged}");
-    assert_eq!(tracked(&app).await, [good], "keeps the last good config");
 }
 
 #[tokio::test]
 async fn the_config_warning_names_a_repo_url_with_credentials_without_showing_them() {
-    let logs = common::logs::capture();
-    let good = "https://example.com/good/repo";
-    let app = TestApp::tracking(&[good]).await;
-
-    app.write_config(&config_tracking(&[
-        good,
+    let CredentialsWarning { banner, logged, .. } = credentials_warning(&config_tracking(&[
+        GOOD_REPO,
         "https://user:secretpw@example.com/foo/bar",
-    ]));
-    app.advance_and_settle(MINUTE).await;
+    ]))
+    .await;
 
-    let banner = config_banner(&app).await.expect("a warning banner");
     assert!(
         banner.contains("must not contain credentials"),
         "why: {banner}"
@@ -391,12 +417,7 @@ async fn the_config_warning_names_a_repo_url_with_credentials_without_showing_th
         banner.contains("example.com/foo/bar"),
         "which repo: {banner}"
     );
-    let page = app.get("/").await.text();
-    assert!(!page.contains("secretpw"), "{page}");
-    let logged = logs.lines().join("\n");
     assert!(logged.contains("must not contain credentials"), "{logged}");
-    assert!(!logged.contains("secretpw"), "{logged}");
-    assert_eq!(tracked(&app).await, [good], "keeps the last good repo list");
 }
 
 #[tokio::test]
