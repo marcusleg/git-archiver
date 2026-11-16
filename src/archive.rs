@@ -242,6 +242,42 @@ impl Archives {
     }
 }
 
+/// Asks upstream for its `HEAD` without fetching anything, to check that the
+/// URL answers like a git repo. On failure, returns what git said.
+pub async fn probe(url: &str) -> Result<(), String> {
+    let output = command(Path::new("."), &["ls-remote", url, "HEAD"])
+        .output()
+        .await
+        .map_err(|e| format!("couldn't run git: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(git_message(&String::from_utf8_lossy(&output.stderr)))
+}
+
+/// What git said about a failure, for people: the server's `remote:` lines
+/// if it sent any, otherwise git's own last error.
+fn git_message(stderr: &str) -> String {
+    let remote: Vec<&str> = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("remote:"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if !remote.is_empty() {
+        return remote.join(" ");
+    }
+    let last = stderr.lines().map(str::trim).rfind(|line| !line.is_empty());
+    match last {
+        Some(line) => ["fatal: ", "error: "]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+            .unwrap_or(line)
+            .to_owned(),
+        None => "git ls-remote failed without saying why".to_owned(),
+    }
+}
+
 /// Initializes a bare repo next to the archive path and moves it into place,
 /// so a crash never leaves a half-created archive.
 async fn create_if_missing(archive: &Path) -> anyhow::Result<()> {

@@ -163,6 +163,9 @@ code {
 /* Main column */
 
 main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
   max-width: var(--list-width);
   margin-inline: auto;
   padding: var(--space-6) var(--space-4);
@@ -323,6 +326,83 @@ main {
 .icon-button.copied .icon-check {
   display: block;
   color: var(--fg);
+}
+
+/* Add form: label above the field, the button beside it until space runs out */
+
+.add-repo form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.add-repo label {
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.add-row input {
+  flex: 1 1 16rem;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color 200ms;
+}
+
+.add-row input::placeholder {
+  color: var(--muted);
+}
+
+.add-row input:focus-visible {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.add-row input[aria-invalid="true"] {
+  border-color: var(--accent-orange);
+}
+
+.button {
+  padding: var(--space-2) var(--space-4);
+  font: inherit;
+  font-weight: 700;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background-color 200ms;
+}
+
+.button.primary {
+  color: var(--on-accent);
+  background: var(--primary);
+}
+
+.button.primary:hover {
+  background: var(--fg);
+}
+
+.form-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.form-error .icon {
+  /* Centred on the first line of a message that wraps. */
+  margin-top: 0.25em;
+  color: var(--accent-orange);
 }
 
 /* Empty state */

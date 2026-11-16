@@ -1,14 +1,17 @@
 //! The scheduler: fetches one tracked repo every `interval ÷ N`, the one with
-//! the oldest last attempt first, one at a time.
+//! the oldest last attempt first, one at a time. Repos added in the UI jump
+//! the queue.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use tokio::sync::Notify;
+
 use crate::archive::{Archives, FetchError};
 use crate::clock::Clock;
 use crate::config;
-use crate::overview::{SharedOverview, Tracked, tracked};
+use crate::overview::{Overview, SharedOverview, Tracked, tracked};
 use crate::state::Status;
 
 /// Every fetch is stopped after this long.
@@ -26,6 +29,8 @@ pub struct Scheduler {
     pub interval: Duration,
     pub started: SystemTime,
     pub overview: SharedOverview,
+    /// Wakes the scheduler from waiting, after a repo jumped the queue.
+    pub wake: Arc<Notify>,
     /// The last config error logged, so a broken file is logged once.
     pub config_error: Option<String>,
 }
@@ -35,13 +40,20 @@ impl Scheduler {
         loop {
             self.reload_tracked();
             let now = self.clock.now();
-            let next = self.next_fetch();
-            self.overview.lock().unwrap().next_fetch = next.as_ref().map(|(due, _)| *due);
-            match next {
+            match self.next_fetch(now) {
                 Some((due, repo)) if due <= now => self.fetch(repo).await,
-                Some((due, _)) => self.clock.sleep_until(due.min(now + CONFIG_RECHECK)).await,
-                None => self.clock.sleep_until(now + CONFIG_RECHECK).await,
+                Some((due, _)) => self.wait_until(due.min(now + CONFIG_RECHECK)).await,
+                None => self.wait_until(now + CONFIG_RECHECK).await,
             }
+        }
+    }
+
+    /// Waits until `deadline`, or until woken because a repo jumped the
+    /// queue.
+    async fn wait_until(&self, deadline: SystemTime) {
+        tokio::select! {
+            () = self.clock.sleep_until(deadline) => {}
+            () = self.wake.notified() => {}
         }
     }
 
@@ -63,17 +75,40 @@ impl Scheduler {
         }
     }
 
-    /// When the next fetch is due and which repo it fetches.
-    fn next_fetch(&self) -> Option<(SystemTime, Tracked)> {
-        let overview = self.overview.lock().unwrap();
+    /// When the next fetch is due and which repo it fetches, also recorded
+    /// in the overview. A repo that jumped the queue is due now.
+    fn next_fetch(&self, now: SystemTime) -> Option<(SystemTime, Tracked)> {
+        // One lock for reading the queue and recording the result, so a repo
+        // jumping the queue meanwhile isn't hidden by a stale due time.
+        let mut overview = self.overview.lock().unwrap();
+        let next = Self::next_in(&overview, self.interval, self.started, now);
+        overview.next_fetch = next.as_ref().map(|(due, _)| *due);
+        next
+    }
+
+    fn next_in(
+        overview: &Overview,
+        interval: Duration,
+        started: SystemTime,
+        now: SystemTime,
+    ) -> Option<(SystemTime, Tracked)> {
+        // Only tracked repos jump the queue; the others wait in it until
+        // they're tracked again.
+        let first = overview
+            .fetch_first
+            .iter()
+            .find_map(|id| overview.tracked.iter().find(|t| &t.id == id));
+        if let Some(repo) = first {
+            return Some((now, repo.clone()));
+        }
         let count = u32::try_from(overview.tracked.len()).unwrap_or(u32::MAX);
         if count == 0 {
             return None;
         }
-        let gap = self.interval / count;
+        let gap = interval / count;
         let last_attempt = |t: &Tracked| overview.repo_state(&t.id).and_then(|s| s.last_attempt);
         let latest = overview.tracked.iter().filter_map(last_attempt).max();
-        let due = latest.unwrap_or(self.started) + gap;
+        let due = latest.unwrap_or(started) + gap;
         // Never-attempted repos sort first (`None < Some`); `min_by_key`
         // keeps the first of equals, so ties go by config order.
         let repo = overview.tracked.iter().min_by_key(|t| last_attempt(t))?;
@@ -99,6 +134,7 @@ impl Scheduler {
         let state = {
             let mut overview = self.overview.lock().unwrap();
             overview.last_fetch_duration = Some(duration);
+            overview.fetch_first.retain(|id| *id != repo.id);
             if let Err(e) = &result {
                 overview.fetch_errors.count(e.status());
             }
