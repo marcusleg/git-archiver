@@ -110,15 +110,24 @@ const GOOD_REPO: &str = "https://example.com/good/repo";
 /// `secretpw`, `se://cretpw` or `ghp_`, and the user names before them.
 const MARKERS: [&str; 5] = ["secret", "cretpw", "se://", "ghp_", "user:"];
 
-/// `problem` after the place `line N[ (`key`)], column M` it names.
-fn ends_with_problem(error: &str, expected: &str) -> bool {
-    error.ends_with(&format!(": {expected}"))
+/// Whether `shown` ends with the error `expected`, which starts with the
+/// place it names, such as ``line 3 (`hosts.…`), column 1``.
+fn ends_with_error(shown: &str, expected: &str) -> bool {
+    shown.ends_with(&format!(": {expected}"))
+}
+
+/// What the app shows once a config is written over a good one by hand.
+struct HandEditError {
+    /// The error in the config warning on the list page.
+    reason: String,
+    /// The whole list page.
+    page: String,
+    logged: String,
 }
 
 /// What the app shows once `config` is written over the config of an app
-/// tracking [`GOOD_REPO`]: the reason in the config warning, the whole list
-/// page and the log. Checks that the app keeps the last good config.
-async fn hand_edit_error(config: &str) -> (String, String, String) {
+/// tracking [`GOOD_REPO`]. Checks that the app keeps the last good config.
+async fn hand_edit_error(config: &str) -> HandEditError {
     let logs = common::logs::capture();
     let app = TestApp::tracking(&[GOOD_REPO]).await;
 
@@ -138,7 +147,11 @@ async fn hand_edit_error(config: &str) -> (String, String, String) {
         .map(|repo| repo.text().collect::<String>().trim().to_owned())
         .collect();
     assert_eq!(repos, [GOOD_REPO], "{config:?}: keeps the last good config");
-    (reason, page, logs.lines().join("\n"))
+    HandEditError {
+        reason,
+        page,
+        logged: logs.lines().join("\n"),
+    }
 }
 
 #[tokio::test]
@@ -194,6 +207,23 @@ async fn every_config_error_shows_where_and_what_but_nothing_the_user_wrote() {
         (
             "[hosts.\"user:se://cretpw@github.com\"]\ntoken = \"ghp_secretpw\"",
             format!("line 1, column 8: `hosts` key {host}"),
+        ),
+        // A `hosts` key shaped like a host but holding credentials.
+        (
+            "[hosts.\"user:secretpw\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 8: `hosts` key {host}"),
+        ),
+        (
+            "[hosts.\"user:secretpw\"]\ntokn = 1",
+            "line 2 (`hosts.….…`), column 1: unknown field `…`, expected `token`".into(),
+        ),
+        (
+            "[hosts.\"[user:secretpw]:1\"]\ntoken = \"ghp_secretpw\"",
+            format!("line 1, column 8: `hosts` key {host}"),
+        ),
+        (
+            "[hosts.\"[::1]:8080\"]\ntoken = \"ghp_secretpw x\"",
+            r#"line 2, column 9: `hosts."[::1]:8080".token` must not be empty or contain spaces, line breaks or control characters"#.into(),
         ),
         // A token that isn't a string, or a table without one.
         (
@@ -380,13 +410,17 @@ token = "ghp_secretpw"
     for (config, expected) in &cases {
         let at_start = TestApp::start_error(config).await;
         assert!(
-            ends_with_problem(&at_start, expected),
+            ends_with_error(&at_start, expected),
             "{config:?} at startup:\n  expected …: {expected}\n  got        {at_start}"
         );
 
-        let (reason, page, logged) = hand_edit_error(config).await;
+        let HandEditError {
+            reason,
+            page,
+            logged,
+        } = hand_edit_error(config).await;
         assert!(
-            ends_with_problem(&reason, expected),
+            ends_with_error(&reason, expected),
             "{config:?} in the warning:\n  expected …: {expected}\n  got        {reason}"
         );
         // The log quotes the error, escaping its quotes and backslashes.
