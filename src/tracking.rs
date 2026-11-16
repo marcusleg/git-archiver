@@ -13,7 +13,7 @@ use crate::archive;
 use crate::clock::Clock;
 use crate::config::{self, EditError, RepoListChange, Tokens};
 use crate::identity::RepoId;
-use crate::overview::SharedOverview;
+use crate::overview::{Overview, SharedOverview};
 
 /// How long tracking waits for upstream to answer.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -144,8 +144,9 @@ impl Tracking {
                 log_edit_error("untrack the repo", &e);
                 return UntrackOutcome::ConfigUnwritable(e.root_cause().to_string());
             }
-            // Only adding refuses a tracked repo.
-            Err(EditError::AlreadyTracked(_)) => unreachable!("removing never finds a duplicate"),
+            // Only adding refuses a tracked repo; if that ever changes, the
+            // config is the problem, not the person.
+            Err(EditError::AlreadyTracked(_)) => return UntrackOutcome::ConfigInvalid,
         };
         if !removed && !shown_tracked {
             return UntrackOutcome::NotTracked;
@@ -169,6 +170,15 @@ impl Tracking {
 
     pub fn is_tracked(&self, id: &RepoId) -> bool {
         self.overview.lock().unwrap().is_tracked(id)
+    }
+
+    /// The repo to fetch before any scheduled fetch: the first queued repo
+    /// that is still tracked.
+    pub fn fetch_first(overview: &Overview) -> Option<&crate::overview::Tracked> {
+        overview
+            .fetch_first
+            .iter()
+            .find_map(|id| overview.tracked.iter().find(|t| &t.id == id))
     }
 
     /// Takes the repo off the fetch-first queue, once it has been fetched.
