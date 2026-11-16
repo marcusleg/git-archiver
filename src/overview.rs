@@ -51,9 +51,11 @@ impl Overview {
         self.state.repos.get(id.as_str())
     }
 
-    /// Queues a repo to fetch as soon as no other fetch is running. The
+    /// Takes the config's new repo list after the repo `id` was added, and
+    /// queues that repo to fetch as soon as no other fetch is running. The
     /// scheduler must be woken to notice.
-    pub fn jump_queue(&mut self, id: RepoId, now: SystemTime) {
+    pub fn add_tracked(&mut self, repos: &[String], id: RepoId, now: SystemTime) {
+        self.tracked = tracked(repos);
         self.fetch_first.push(id);
         self.next_fetch = Some(now);
     }

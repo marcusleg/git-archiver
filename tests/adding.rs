@@ -89,6 +89,8 @@ async fn an_added_repo_is_cloned_right_away_and_shows_as_available() {
         cards(&app).await,
         [(upstream.url().to_owned(), "Fetched just now".to_owned())]
     );
+    let html = Html::parse_document(&app.get("/").await.text());
+    assert_eq!(select(&html, "main article .status.available").len(), 1);
     let id = format!("http://{}/foo/bar", forge.host());
     assert_eq!(app.metrics().await.last_success(&id), Some(start));
     let archive = app.archive(&format!("{}/foo/bar", forge.host()));
@@ -132,6 +134,18 @@ async fn adding_a_repo_appends_it_to_the_config_and_leaves_the_rest_of_the_file_
         (
             "interval = \"6h\"\n".to_owned(),
             format!("interval = \"6h\"\nrepos = [\"{new}\"]\n"),
+        ),
+        (
+            "# My archive\n\n[hosts.\"github.com\"]\ntoken = \"ghp_x\"\n".to_owned(),
+            format!(
+                "# My archive\n\nrepos = [\"{new}\"]\n\n[hosts.\"github.com\"]\ntoken = \"ghp_x\"\n"
+            ),
+        ),
+        (
+            format!("# Windows\r\nrepos = [\r\n  \"{existing}\",\r\n]\r\ninterval = \"6h\"\r\n"),
+            format!(
+                "# Windows\r\nrepos = [\r\n  \"{existing}\",\r\n  \"{new}\",\r\n]\r\ninterval = \"6h\"\r\n"
+            ),
         ),
     ];
     for (before, expected) in cases {
@@ -230,6 +244,45 @@ async fn a_url_with_the_identity_of_a_tracked_repo_is_rejected_as_a_duplicate() 
     assert_eq!(
         form_error(&page).as_deref(),
         Some("“https://github.com/foo/bar” is already tracked.")
+    );
+    assert_eq!(app.config(), config);
+}
+
+#[tokio::test]
+async fn a_url_differing_only_in_scheme_is_rejected_because_it_shares_the_archive() {
+    let app = TestApp::tracking(&["https://github.com/foo/bar"]).await;
+    let config = app.config();
+
+    let page = app.add_repo("http://github.com/foo/bar").await;
+
+    assert_eq!(
+        form_error(&page).as_deref(),
+        Some("“http://github.com/foo/bar” is already tracked as “https://github.com/foo/bar”.")
+    );
+    assert_eq!(app.config(), config);
+}
+
+#[tokio::test]
+async fn an_upstream_that_doesnt_answer_within_a_minute_is_not_added() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/slow");
+    upstream.commit("first");
+    forge.hang("foo/slow");
+    let app = TestApp::start().await;
+    let config = app.config();
+
+    let (page, ()) = tokio::join!(app.add_repo(upstream.url()), async {
+        forge.wait_for_hung_request().await;
+        app.advance(std::time::Duration::from_secs(60));
+    });
+
+    assert_eq!(page.status, 422);
+    assert_eq!(
+        form_error(&page),
+        Some(format!(
+            "Couldn’t reach “{}”: it didn’t answer within a minute.",
+            upstream.url()
+        ))
     );
     assert_eq!(app.config(), config);
 }
