@@ -168,7 +168,7 @@ async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
     }
     let id = config::check_repo_url(url).map_err(|problem| format!("“{url}” {problem}."))?;
     let token = config::check_add(&app.config_path, &id)
-        .map_err(|e| edit_error(app, url, "add the repo", e))?;
+        .map_err(|e| edit_error(app, Some(url), "add the repo", e))?;
 
     let deadline = app.clock.now() + PROBE_TIMEOUT;
     let probe = tokio::select! {
@@ -187,7 +187,7 @@ async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
             overview.add_tracked(repos, id.clone(), app.clock.now());
         },
     )
-    .map_err(|e| edit_error(app, url, "add the repo", e))?;
+    .map_err(|e| edit_error(app, Some(url), "add the repo", e))?;
     tracing::info!(repo = %id, "added");
     app.wake_scheduler.notify_one();
     Ok(())
@@ -195,17 +195,18 @@ async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
 
 /// Why the config's repo list couldn't be changed, for the page. `action` is
 /// what the person tried, such as "add the repo".
-fn edit_error(app: &AppState, url: &str, action: &str, error: EditError) -> String {
+fn edit_error(app: &AppState, url: Option<&str>, action: &str, error: EditError) -> String {
     if let EditError::Invalid(e) | EditError::Io(e) = &error {
         tracing::error!(error = %format!("{e:#}"), "couldn't {action} in the config");
     }
     match error {
-        EditError::AlreadyTracked(existing) if existing == url => {
-            format!("“{url}” is already tracked.")
+        EditError::AlreadyTracked(existing) if Some(existing.as_str()) == url => {
+            format!("“{existing}” is already tracked.")
         }
-        EditError::AlreadyTracked(existing) => {
-            format!("“{url}” is already tracked as “{existing}”.")
-        }
+        EditError::AlreadyTracked(existing) => match url {
+            Some(url) => format!("“{url}” is already tracked as “{existing}”."),
+            None => "The repo is already tracked.".to_owned(),
+        },
         EditError::Invalid(_) => format!(
             "Couldn’t {action}: the config file is invalid. Fix {} and try again.",
             app.config_path.display()
@@ -269,7 +270,7 @@ async fn try_untrack(app: &AppState, id: &RepoId, archive: ArchiveChoice) -> Res
         config::edit_repo_list(&app.config_path, RepoListChange::Remove { id }, |repos| {
             app.overview.lock().unwrap().set_tracked(repos)
         })
-        .map_err(|e| edit_error(app, "", "untrack the repo", e))?
+        .map_err(|e| edit_error(app, None, "untrack the repo", e))?
             == config::Edited::Changed;
     if !removed && !shown_tracked {
         // Already untracked, e.g. a form sent twice. Deleting an untracked
