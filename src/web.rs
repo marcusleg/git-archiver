@@ -17,7 +17,7 @@ use tokio::sync::Notify;
 
 use crate::archive::{self, Archives, Inspection};
 use crate::clock::Clock;
-use crate::config::{self, AddError, RemoveError};
+use crate::config::{self, EditError, RepoListChange};
 use crate::git_http;
 use crate::identity::RepoId;
 use crate::metrics;
@@ -167,7 +167,8 @@ async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
         return Err("Enter the URL of the repo to add.".to_owned());
     }
     let id = config::check_repo_url(url).map_err(|problem| format!("“{url}” {problem}."))?;
-    let token = config::check_add(&app.config_path, &id).map_err(|e| add_error(app, url, e))?;
+    let token = config::check_add(&app.config_path, &id)
+        .map_err(|e| edit_error(app, url, "add the repo", e))?;
 
     let deadline = app.clock.now() + PROBE_TIMEOUT;
     let probe = tokio::select! {
@@ -178,33 +179,39 @@ async fn try_add(app: &AppState, url: &str) -> Result<(), String> {
     };
     probe.map_err(|message| format!("Couldn’t reach “{url}”: {message}"))?;
 
-    config::add_repo(&app.config_path, url, &id, |repos| {
-        let mut overview = app.overview.lock().unwrap();
-        overview.add_tracked(repos, id.clone(), app.clock.now());
-    })
-    .map_err(|e| add_error(app, url, e))?;
+    config::edit_repo_list(
+        &app.config_path,
+        RepoListChange::Add { url, id: &id },
+        |repos| {
+            let mut overview = app.overview.lock().unwrap();
+            overview.add_tracked(repos, id.clone(), app.clock.now());
+        },
+    )
+    .map_err(|e| edit_error(app, url, "add the repo", e))?;
     tracing::info!(repo = %id, "added");
     app.wake_scheduler.notify_one();
     Ok(())
 }
 
-fn add_error(app: &AppState, url: &str, error: AddError) -> String {
-    if let AddError::Invalid(e) | AddError::Io(e) = &error {
-        tracing::error!(error = %format!("{e:#}"), "couldn't add a repo to the config");
+/// Why the config's repo list couldn't be changed, for the page. `action` is
+/// what the person tried, such as "add the repo".
+fn edit_error(app: &AppState, url: &str, action: &str, error: EditError) -> String {
+    if let EditError::Invalid(e) | EditError::Io(e) = &error {
+        tracing::error!(error = %format!("{e:#}"), "couldn't {action} in the config");
     }
     match error {
-        AddError::AlreadyTracked(existing) if existing == url => {
+        EditError::AlreadyTracked(existing) if existing == url => {
             format!("“{url}” is already tracked.")
         }
-        AddError::AlreadyTracked(existing) => {
+        EditError::AlreadyTracked(existing) => {
             format!("“{url}” is already tracked as “{existing}”.")
         }
-        AddError::Invalid(_) => format!(
-            "Couldn’t add the repo: the config file is invalid. Fix {} and try again.",
+        EditError::Invalid(_) => format!(
+            "Couldn’t {action}: the config file is invalid. Fix {} and try again.",
             app.config_path.display()
         ),
-        AddError::Io(e) => format!(
-            "Couldn’t add the repo: {} can’t be read or written ({}). \
+        EditError::Io(e) => format!(
+            "Couldn’t {action}: {} can’t be read or written ({}). \
              Check that the app may write to it and try again.",
             app.config_path.display(),
             e.root_cause()
@@ -258,10 +265,12 @@ async fn try_untrack(app: &AppState, id: &RepoId, archive: ArchiveChoice) -> Res
     // A repo removed from the file by hand still shows as tracked until the
     // scheduler re-reads it; the person saw it tracked, so it counts.
     let shown_tracked = app.overview.lock().unwrap().is_tracked(id);
-    let removed = config::remove_repo(&app.config_path, id, |repos| {
-        app.overview.lock().unwrap().set_tracked(repos);
-    })
-    .map_err(|e| remove_error(app, e))?;
+    let removed =
+        config::edit_repo_list(&app.config_path, RepoListChange::Remove { id }, |repos| {
+            app.overview.lock().unwrap().set_tracked(repos)
+        })
+        .map_err(|e| edit_error(app, "", "untrack the repo", e))?
+            == config::Edited::Changed;
     if !removed && !shown_tracked {
         // Already untracked, e.g. a form sent twice. Deleting an untracked
         // archive isn't offered.
@@ -293,23 +302,6 @@ async fn try_untrack(app: &AppState, id: &RepoId, archive: ArchiveChoice) -> Res
     save_state(&app.overview, &app.state_path);
     tracing::info!(repo = %id, "deleted archive");
     Ok(())
-}
-
-fn remove_error(app: &AppState, error: RemoveError) -> String {
-    let (RemoveError::Invalid(e) | RemoveError::Io(e)) = &error;
-    tracing::error!(error = %format!("{e:#}"), "couldn't remove a repo from the config");
-    match error {
-        RemoveError::Invalid(_) => format!(
-            "Couldn’t untrack the repo: the config file is invalid. Fix {} and try again.",
-            app.config_path.display()
-        ),
-        RemoveError::Io(e) => format!(
-            "Couldn’t untrack the repo: {} can’t be read or written ({}). \
-             Check that the app may write to it and try again.",
-            app.config_path.display(),
-            e.root_cause()
-        ),
-    }
 }
 
 async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Html<String> {
