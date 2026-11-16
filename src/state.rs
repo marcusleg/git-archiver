@@ -10,6 +10,8 @@ use std::time::SystemTime;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::archive::FetchError;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -29,6 +31,14 @@ pub struct RepoState {
     pub status: Option<Status>,
     #[serde(default, with = "rfc3339", skip_serializing_if = "Option::is_none")]
     pub status_since: Option<SystemTime>,
+    /// Git's message for the last failed fetch, while the repo isn't
+    /// Available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The HTTP status upstream refused the repo with, while it's
+    /// Unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
 }
@@ -41,15 +51,39 @@ impl RepoState {
         self.size_bytes = size_bytes;
     }
 
-    /// Records a successful fetch. Returns whether the status changed.
-    pub fn record_success(&mut self, at: SystemTime) -> bool {
-        self.last_success = Some(at);
-        if self.status == Some(Status::Available) {
-            return false;
+    /// Records a fetch's result. Returns the previous status if the status
+    /// changed; the status-since time is kept while it doesn't.
+    pub fn record_result(
+        &mut self,
+        at: SystemTime,
+        result: &Result<(), FetchError>,
+    ) -> Option<Option<Status>> {
+        let status = match result {
+            Ok(()) => {
+                self.last_success = Some(at);
+                self.error = None;
+                self.http_status = None;
+                Status::Available
+            }
+            Err(e) => {
+                self.error = Some(e.reason().to_owned());
+                match e {
+                    FetchError::Unavailable { http_status, .. } => {
+                        self.http_status = Some(*http_status);
+                        Status::Unavailable
+                    }
+                    FetchError::Failed { .. } => {
+                        self.http_status = None;
+                        Status::FetchFailed
+                    }
+                }
+            }
+        };
+        if self.status == Some(status) {
+            return None;
         }
-        self.status = Some(Status::Available);
         self.status_since = Some(at);
-        true
+        Some(self.status.replace(status))
     }
 }
 
@@ -58,6 +92,23 @@ impl RepoState {
 pub enum Status {
     /// The last fetch succeeded.
     Available,
+    /// Upstream refused the repo with a 4xx response.
+    Unavailable,
+    /// The last fetch failed for a transient reason.
+    FetchFailed,
+}
+
+impl Status {
+    pub const ALL: [Status; 3] = [Status::Available, Status::Unavailable, Status::FetchFailed];
+
+    /// As in `state.json`, metrics labels and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Available => "available",
+            Status::Unavailable => "unavailable",
+            Status::FetchFailed => "fetch_failed",
+        }
+    }
 }
 
 pub fn file_path(data_dir: &Path) -> PathBuf {

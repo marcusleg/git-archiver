@@ -56,7 +56,7 @@ fn assert_valid_exposition(text: &str) {
 }
 
 #[tokio::test]
-async fn metrics_report_last_success_size_next_fetch_and_fetch_duration() {
+async fn metrics_report_status_last_success_size_next_fetch_and_fetch_duration() {
     let forge = FakeForge::start().await;
     let upstream = forge.create_repo("foo/bar");
     upstream.commit("first");
@@ -95,12 +95,18 @@ async fn metrics_report_last_success_size_next_fetch_and_fetch_duration() {
         .unwrap();
     assert!((0.0..60.0).contains(&duration), "{duration}");
 
+    assert_eq!(metrics.repo_status(&repo), Some("available"));
+
     let never = [("repo", "https://example.com/never/fetched")];
     assert_eq!(
         metrics.value("archiver_repo_last_success_timestamp_seconds", &never),
         None
     );
     assert_eq!(metrics.value("archiver_repo_size_bytes", &never), None);
+    assert_eq!(
+        metrics.repo_status("https://example.com/never/fetched"),
+        None
+    );
 }
 
 #[tokio::test]
@@ -109,5 +115,21 @@ async fn metrics_are_valid_before_anything_is_fetched() {
 
     let text = app.get("/metrics").await.text();
     assert_valid_exposition(&text);
-    assert!(Metrics::parse(&text).samples().is_empty(), "{text}");
+    let metrics = Metrics::parse(&text);
+    let samples: Vec<(&str, f64)> = metrics
+        .samples()
+        .iter()
+        .map(|s| (s.name.as_str(), s.value))
+        .collect();
+    assert_eq!(
+        samples,
+        [
+            ("archiver_fetch_errors_total", 0.0),
+            ("archiver_fetch_errors_total", 0.0)
+        ],
+        "only the error counters, at 0: {text}"
+    );
+    assert_eq!(metrics.fetch_errors("unavailable"), Some(0.0));
+    assert_eq!(metrics.fetch_errors("fetch_failed"), Some(0.0));
+    assert!(text.contains("# TYPE archiver_fetch_errors_total counter\n"));
 }

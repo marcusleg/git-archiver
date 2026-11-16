@@ -15,6 +15,14 @@ pub struct Overview {
     pub state: State,
     pub next_fetch: Option<SystemTime>,
     pub last_fetch_duration: Option<Duration>,
+    /// Failed fetches since the app started.
+    pub fetch_errors: FetchErrors,
+}
+
+#[derive(Debug, Default)]
+pub struct FetchErrors {
+    pub unavailable: u64,
+    pub fetch_failed: u64,
 }
 
 #[derive(Debug, Clone)]

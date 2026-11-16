@@ -2,7 +2,7 @@
 //! running `git http-backend` as a CGI, the way a real git host would answer.
 //! Tests change upstream by pushing to it.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -30,10 +30,30 @@ pub struct FakeForge {
 /// How the forge answers, shared with its request handler.
 struct Behaviour {
     served: PathBuf,
-    /// Repo paths whose requests never get an answer.
-    hanging: Mutex<HashSet<String>>,
+    /// Repos that fail instead of being served, by request path prefix.
+    failing: Mutex<HashMap<String, Failure>>,
     hung_requests: AtomicUsize,
 }
+
+/// A way the forge can refuse or fail to serve a repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// 403 with GitHub's DMCA `remote:` message.
+    DmcaTakedown,
+    /// 404 "Repository not found", as GitHub answers for a deleted repo.
+    NotFound,
+    /// 401 asking for credentials, as GitHub answers anonymous requests for
+    /// some repos.
+    Unauthorized,
+    /// 500.
+    ServerError,
+    /// Never answers.
+    Hang,
+}
+
+pub const DMCA_MESSAGE: &str = "Repository unavailable due to DMCA takedown.";
+pub const DMCA_NOTICE: &str =
+    "https://github.com/github/dmca/blob/master/2026/10/2026-10-23-example.md";
 
 impl Drop for FakeForge {
     fn drop(&mut self) {
@@ -50,7 +70,7 @@ impl FakeForge {
         let addr = listener.local_addr().unwrap();
         let behaviour = Arc::new(Behaviour {
             served: dir.path().join("served"),
-            hanging: Mutex::default(),
+            failing: Mutex::default(),
             hung_requests: AtomicUsize::new(0),
         });
         let router = axum::Router::new()
@@ -69,11 +89,35 @@ impl FakeForge {
 
     /// Makes every request for the repo at `path` hang without an answer.
     pub fn hang(&self, path: &str) {
+        self.fail(path, Failure::Hang);
+    }
+
+    /// Makes every request for the repo at `path` fail this way, until
+    /// [`Self::restore`].
+    pub fn fail(&self, path: &str, failure: Failure) {
         self.behaviour
-            .hanging
+            .failing
             .lock()
             .unwrap()
-            .insert(format!("/{path}.git/"));
+            .insert(format!("/{path}.git/"), failure);
+    }
+
+    /// Serves the repo at `path` normally again.
+    pub fn restore(&self, path: &str) {
+        self.behaviour
+            .failing
+            .lock()
+            .unwrap()
+            .remove(&format!("/{path}.git/"));
+    }
+
+    /// Stops answering altogether: connections to the forge are refused
+    /// from now on.
+    pub async fn go_offline(&self) {
+        self.server.abort();
+        while !self.server.is_finished() {
+            tokio::task::yield_now().await;
+        }
     }
 
     /// Waits (in real time) until a request has hung.
@@ -188,15 +232,15 @@ impl Upstream {
 /// Answers one request by running `git http-backend` as a CGI script.
 async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
-    let hangs = {
-        let hanging = behaviour.hanging.lock().unwrap();
-        hanging
+    let failure = {
+        let failing = behaviour.failing.lock().unwrap();
+        failing
             .iter()
-            .any(|prefix| parts.uri.path().starts_with(prefix))
+            .find(|(prefix, _)| parts.uri.path().starts_with(prefix.as_str()))
+            .map(|(_, failure)| *failure)
     };
-    if hangs {
-        behaviour.hung_requests.fetch_add(1, Ordering::SeqCst);
-        std::future::pending::<()>().await;
+    if let Some(failure) = failure {
+        return fail(&behaviour, failure).await;
     }
     let body = to_bytes(body, usize::MAX).await.unwrap();
 
@@ -233,6 +277,37 @@ async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request)
     let output = child.wait_with_output().await.unwrap();
     let _ = writer.await;
     cgi_response(&output.stdout)
+}
+
+async fn fail(behaviour: &Behaviour, failure: Failure) -> Response {
+    let (status, body) = match failure {
+        Failure::DmcaTakedown => (
+            StatusCode::FORBIDDEN,
+            format!("{DMCA_MESSAGE}\nSee the takedown notice for more details:\n  {DMCA_NOTICE}\n"),
+        ),
+        Failure::NotFound => (StatusCode::NOT_FOUND, "Repository not found.\n".to_owned()),
+        Failure::Unauthorized => (StatusCode::UNAUTHORIZED, String::new()),
+        Failure::ServerError => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error\n".to_owned(),
+        ),
+        Failure::Hang => {
+            behaviour.hung_requests.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+    };
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    headers.insert("content-type", HeaderValue::from_static("text/plain"));
+    if failure == Failure::Unauthorized {
+        headers.insert(
+            "www-authenticate",
+            HeaderValue::from_static("Basic realm=\"GitHub\""),
+        );
+    }
+    response
 }
 
 fn cgi_header_var(name: &str) -> String {

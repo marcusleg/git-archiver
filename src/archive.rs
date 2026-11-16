@@ -6,9 +6,14 @@
 //! refs to the staged state in one transaction and clears staging. A fetch
 //! interrupted in between leaves only staging refs behind, which the next
 //! fetch clears first.
+//!
+//! A failed fetch is classified from git's exit and stderr alone (ADR-0001):
+//! upstream refusing the repo makes it Unavailable, anything else is a
+//! transient Fetch failed.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -32,6 +37,83 @@ pub struct Inspection {
     pub tip: Option<String>,
 }
 
+/// Why a fetch failed. Neither kind touches the archive's refs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchError {
+    /// Upstream refused the repo with a 4xx response.
+    Unavailable {
+        /// The HTTP status, as git reported it or as its message implies.
+        http_status: u16,
+        reason: String,
+    },
+    /// A transient failure that says nothing about the repo's fate.
+    Failed { reason: String },
+}
+
+impl FetchError {
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Unavailable { reason, .. } | Self::Failed { reason } => reason,
+        }
+    }
+}
+
+impl fmt::Display for FetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for FetchError {}
+
+/// Sorts a failed git command talking to upstream by its stderr. The reason
+/// is git's message: the `remote:` lines plus the final error.
+fn classify(stderr: &str) -> FetchError {
+    let lines: Vec<&str> = stderr.lines().map(str::trim_end).collect();
+    let last_error = lines
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("fatal: ") || line.starts_with("error: "));
+    let reason = lines
+        .iter()
+        .filter(|line| line.starts_with("remote:"))
+        .chain(last_error)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let reason = if reason.is_empty() {
+        stderr.trim().to_owned()
+    } else {
+        reason
+    };
+    let error = last_error.copied().unwrap_or_default();
+    let http_status =
+        if let Some((_, code)) = error.rsplit_once("The requested URL returned error: ") {
+            code.get(..3).and_then(|code| code.parse().ok())
+        } else if error.starts_with("fatal: repository '") && error.ends_with("' not found") {
+            // Git prints this instead of the 404 status.
+            Some(404)
+        } else if error.starts_with("fatal: could not read Username for ")
+            || error.starts_with("fatal: Authentication failed for ")
+        {
+            // Git asked for credentials and got none, so the server answered 401.
+            Some(401)
+        } else {
+            None
+        };
+    match http_status {
+        // 408 and 429 ask the client to come back later, which says nothing
+        // about the repo's fate.
+        Some(http_status @ 400..500) if http_status != 408 && http_status != 429 => {
+            FetchError::Unavailable {
+                http_status,
+                reason,
+            }
+        }
+        _ => FetchError::Failed { reason },
+    }
+}
+
 impl Archives {
     pub fn new(data_dir: &Path) -> Self {
         Self {
@@ -45,11 +127,21 @@ impl Archives {
 
     /// Clones the repo into its archive, or updates the archive from
     /// upstream. Only adds history: archived refs move only by fast-forward,
-    /// and refs upstream deleted or rewrote stay as they are.
-    pub async fn fetch(&self, id: &RepoId, url: &str) -> anyhow::Result<()> {
+    /// and refs upstream deleted or rewrote stay as they are. A repo upstream
+    /// refuses on its first fetch gets no archive.
+    pub async fn fetch(&self, id: &RepoId, url: &str) -> Result<(), FetchError> {
+        self.try_fetch(id, url).await.map_err(|e| {
+            e.downcast::<FetchError>()
+                .unwrap_or_else(|e| FetchError::Failed {
+                    reason: format!("{e:#}"),
+                })
+        })
+    }
+
+    async fn try_fetch(&self, id: &RepoId, url: &str) -> anyhow::Result<()> {
         let archive = self.path(id);
-        create_if_missing(&archive).await?;
         let default_branch = upstream_default_branch(url).await?;
+        create_if_missing(&archive).await?;
 
         clear_staging(&archive).await?;
         let mut refspecs = vec![format!("+refs/tags/*:{STAGING}tags/*")];
@@ -65,7 +157,7 @@ impl Archives {
             url,
         ];
         args.extend(refspecs.iter().map(String::as_str));
-        git(&archive, &args).await?;
+        git_upstream(&archive, &args).await?;
 
         let staged = list_refs(&archive, &[STAGING]).await?;
         let archived = list_refs(&archive, &["refs/heads/", "refs/tags/"]).await?;
@@ -153,7 +245,7 @@ async fn create_if_missing(archive: &Path) -> anyhow::Result<()> {
 /// The branch upstream's `HEAD` points at, or `None` for an upstream with no
 /// commits, which doesn't advertise one.
 async fn upstream_default_branch(url: &str) -> anyhow::Result<Option<String>> {
-    let output = git(Path::new("."), &["ls-remote", "--symref", url, "HEAD"]).await?;
+    let output = git_upstream(Path::new("."), &["ls-remote", "--symref", url, "HEAD"]).await?;
     let branch = output.lines().find_map(|line| {
         let (target, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
         (name == "HEAD").then_some(target)
@@ -213,6 +305,19 @@ async fn rev_parse(archive: &Path, rev: &str) -> anyhow::Result<Option<String>> 
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
+}
+
+/// Runs a git command that talks to upstream. Its failure is a
+/// [`FetchError`], classified from git's stderr.
+async fn git_upstream(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = command(dir, args)
+        .output()
+        .await
+        .context("couldn't run git")?;
+    if !output.status.success() {
+        return Err(classify(&String::from_utf8_lossy(&output.stderr)).into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
