@@ -9,8 +9,8 @@ Upstream can lose history. Someone force-pushes the default branch, moves or del
 Every tracked repo has one of three statuses:
 
 - **Available**: the last fetch succeeded.
-- **Unavailable**: upstream refused the repo with a 4xx response, such as a DMCA takedown or a deleted repo. The archive is left untouched, and the repo keeps being fetched, so it becomes Available again if upstream restores it.
-- **Fetch failed**: a transient problem such as a 5xx response, a network error or a timeout. It says nothing about the repo's fate, never touches the archive, and is retried at the repo's next turn.
+- **Unavailable**: upstream refused the repo with a 4xx response, such as a DMCA takedown or a deleted repo (except 408 and 429, which only ask to come back later). The archive is left untouched, and the repo keeps being fetched, so it becomes Available again if upstream restores it.
+- **Fetch failed**: a transient problem such as a 5xx response, a 408 or 429, a network error or a timeout. It says nothing about the repo's fate, never touches the archive, and is retried at the repo's next turn.
 
 A web UI lists every archive with its status, tip and preserved refs. You can add repos there or untrack them. Archives can be cloned read-only over HTTP, and `/metrics` exposes everything to Prometheus.
 
@@ -25,7 +25,7 @@ The terms in bold are defined in [`CONTEXT.md`](CONTEXT.md).
 
 ## Running it
 
-Git Archiver keeps everything in one **data directory**: its config, its state and the archives. On first start it creates the directory and writes a commented default config into it. Back up or move that one directory to back up or move the app.
+Git Archiver keeps everything in one data directory: its config, its state and the archives. On first start it creates the directory and writes a commented default config into it. To move the app or keep a copy of everything, copy that one directory.
 
 ```text
 <data dir>/
@@ -67,7 +67,7 @@ To build the image yourself, run `docker build -t git-archiver .`.
 
 ### Binary
 
-Each [release](https://github.com/marcusleg/git-archiver/releases) has static binaries for Linux amd64 and arm64. They run on any Linux host with `git` installed, and need nothing else.
+Each [release](https://github.com/marcusleg/git-archiver/releases) has static binaries for Linux amd64 and arm64. They run on any Linux host with `git` installed, and need nothing else. The git endpoint runs `git http-backend`, which some distributions package separately, such as `git-daemon` on Alpine.
 
 ```sh
 version=v0.1.0   # the release you want
@@ -136,7 +136,7 @@ token = "ghp_..."
 | `repos` | `[]` | The URLs of the tracked repos. Only `http://` and `https://` URLs are allowed, without credentials in them. URLs that differ only in the host's case, a trailing `.git` or trailing slashes are the same repo and share one archive. |
 | `hosts."<host>".token` | none | An optional token for one host, such as `github.com`. It is used only when fetching from that host, for example to avoid anonymous clone rate limits, and is never shown in the UI, logs or metrics. |
 
-You can edit `config.toml` while the app runs. The app re-reads the repo list before every fetch, and at least once a minute. Changes to `interval` and `listen` take effect on restart. If you save an invalid file, the app keeps running on the last good config and logs an error until the file is valid again.
+You can edit `config.toml` while the app runs. The app re-reads the repo list before every fetch, and at least once a minute. Changes to `interval` and `listen` take effect on restart. If you save an invalid file, the app keeps running on the last good config, logs an error and shows a warning in the UI until the file is valid again.
 
 Adding a repo in the UI writes it into `config.toml`, and keeps your comments and formatting. A newly added repo is cloned right away.
 
@@ -166,7 +166,7 @@ The clone command in the UI uses the host and port your browser reached the app 
 
 ## Metrics
 
-`/metrics` serves Prometheus metrics in the text format. Per-repo metrics carry a `repo` label holding the repo's normalized URL, such as `github.com/owner/repo`.
+`/metrics` serves Prometheus metrics in the text format. Per-repo metrics carry a `repo` label holding the repo's normalized URL, such as `https://github.com/owner/repo`.
 
 | Metric | Type | Meaning |
 |---|---|---|
@@ -177,7 +177,7 @@ The clone command in the UI uses the host and port your browser reached the app 
 | `archiver_repo_tracked{repo}` | gauge | 1 for a tracked repo, 0 for an untracked archive. |
 | `archiver_next_fetch_timestamp_seconds` | gauge | When the next fetch is due, in Unix seconds. |
 | `archiver_fetch_duration_seconds` | gauge | How long the last fetch took. |
-| `archiver_rewrites_total` | counter | Rewrites detected since the app started. |
+| `archiver_rewrites_total` | counter | Fetches that found a rewrite upstream and preserved the old tips, since the app started. |
 | `archiver_fetch_errors_total{status}` | counter | Failed fetches since the app started, by the status they led to: `unavailable` or `fetch_failed`. |
 
 Example alerts:
