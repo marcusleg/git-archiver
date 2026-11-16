@@ -144,14 +144,17 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
     parse(&text).with_context(|| format!("invalid config {}", path.display()))
 }
 
-/// Reads and checks a config. Every config error comes from here, and is
-/// built only from text the app knows, as it goes to the startup error, the
-/// log and the list page, which anyone can read, and anything the user wrote
-/// may be a credential: see [`ConfigError`].
+/// The config a file's text holds. Every config error is shown from here.
+/// It goes to the startup error, the log and the list page, which anyone
+/// can read, and anything the user wrote may be a credential, so the error
+/// is built from text the app knows, plus only what of the file the app has
+/// checked: hosts that pass [`is_host`] and URLs as [`shown_url`] names
+/// them. See [`ConfigError`].
 fn parse(text: &str) -> anyhow::Result<Config> {
     check(text).map_err(|error| anyhow::anyhow!(error.shown(text)))
 }
 
+/// The config a file's text holds, or the first error in it.
 fn check(text: &str) -> Result<Config, ConfigError> {
     let doc = DeTable::parse(text).map_err(|e| ConfigError::while_parsing(&e))?;
     let raw = RawConfig::deserialize(toml::de::Deserializer::from(doc.clone()))
@@ -222,6 +225,9 @@ impl ConfigError {
         }
     }
 
+    /// The error as the app shows it, such as
+    /// ``line 3 (`hosts."github.com".…`), column 1: unknown field `…`, expected `token` ``,
+    /// with the line and column counted in `text`, the file it was found in.
     fn shown(&self, text: &str) -> String {
         let Some(span) = &self.span else {
             return self.problem.clone();
@@ -345,6 +351,7 @@ fn hide_file_text(message: &str, key: Option<&str>) -> String {
 }
 
 /// Where the string serde wrote ends: at the first `"` no `\` escapes.
+/// None if it never ends.
 fn string_end(quoted: &str) -> Option<usize> {
     let mut escaped = false;
     for (i, c) in quoted.char_indices() {
@@ -358,6 +365,7 @@ fn string_end(quoted: &str) -> Option<usize> {
     None
 }
 
+/// The `interval` setting as a duration, if it's a valid one.
 fn check_interval(text: &Spanned<String>) -> Result<Duration, ConfigError> {
     let interval = humantime::parse_duration(text.get_ref()).map_err(|_| {
         ConfigError::at(
@@ -371,11 +379,12 @@ fn check_interval(text: &Spanned<String>) -> Result<Duration, ConfigError> {
     Ok(interval)
 }
 
-/// Checks the `repos` entry at `position`, counting from 1.
+/// The `repos` entry at `position`, counting from 1, if the config would
+/// accept it.
 fn check_repo_entry(position: usize, repo: Spanned<String>) -> Result<String, ConfigError> {
     if let Err(problem) = check_repo_url(repo.get_ref()) {
         let name =
-            url_name(repo.get_ref()).map_or(position.to_string(), |name| format!("{name:?}"));
+            shown_url(repo.get_ref()).map_or(position.to_string(), |name| format!("{name:?}"));
         return Err(ConfigError::at(
             &repo,
             format!("`repos` entry {name} {problem}"),
@@ -391,7 +400,7 @@ fn check_repo_entry(position: usize, repo: Spanned<String>) -> Result<String, Co
 /// with a host, or if an `@` follows the host, as it does when a `#`, `/` or
 /// `?` in a password ends the user info early and leaves the rest of it in
 /// the host and path.
-fn url_name(text: &str) -> Option<String> {
+fn shown_url(text: &str) -> Option<String> {
     let url = url::Url::parse(text).ok()?;
     let host = url.host_str().filter(|host| !host.is_empty())?;
     if url[url::Position::BeforePath..].contains('@') {
@@ -760,12 +769,36 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
 }
 
 /// Whether a `hosts` key is a host, with a port if it names one, such as
-/// `github.com` or `localhost:3000`.
+/// `github.com`, `localhost:3000` or `[::1]:8080`. Only a port follows a
+/// `:`, so a key such as `user:password` is no host.
 fn is_host(key: &str) -> bool {
-    !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".-_:[]".contains(c))
+    let (name_ok, port) = match key.strip_prefix('[') {
+        Some(bracketed) => match bracketed.split_once(']') {
+            Some((ip, port)) => (
+                !ip.is_empty()
+                    && ip
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || ":.".contains(c)),
+                port,
+            ),
+            None => return false,
+        },
+        None => {
+            let (name, port) = key.split_at(key.find(':').unwrap_or(key.len()));
+            (
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c)),
+                port,
+            )
+        }
+    };
+    let port_ok = port.is_empty()
+        || port
+            .strip_prefix(':')
+            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
+    name_ok && port_ok
 }
 
 /// A host as a toml key: quoted unless it's a bare key. A host holds no `"`
@@ -781,6 +814,8 @@ fn shown_host(host: &str) -> String {
     }
 }
 
+/// The tokens by host, if every `hosts` key is a host, listed once, with a
+/// well-formed token.
 fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, ConfigError> {
     let mut hosts: Vec<_> = hosts.into_iter().collect();
     // In file order, so a host listed twice is reported where it repeats.
@@ -788,7 +823,7 @@ fn check_hosts(hosts: BTreeMap<Spanned<String>, HostConfig>) -> Result<Tokens, C
     let mut tokens = BTreeMap::new();
     for (host, settings) in hosts {
         if !is_host(host.get_ref()) {
-            let name = url_name(host.get_ref())
+            let name = shown_url(host.get_ref())
                 .map(|name| format!("{name:?} "))
                 .unwrap_or_default();
             return Err(ConfigError::at(
