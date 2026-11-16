@@ -565,6 +565,14 @@ p.preserved,
   min-width: 0;
 }
 
+.mirror-note {
+  margin: var(--space-3) 0 0;
+}
+
+.preserved .clone-line {
+  margin-top: var(--space-2);
+}
+
 /* Empty state */
 
 .empty {

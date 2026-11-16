@@ -518,6 +518,7 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
     } = card;
     // Only an archive on disk can be cloned.
     let clone = archived.then(|| git_http::clone_command(base, id));
+    let mirror = archived.then(|| git_http::mirror_clone_command(base, id));
     let fetched = state.status == Some(Status::Available);
     let unavailable_or_failed = matches!(
         state.status,
@@ -605,17 +606,10 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
                 }
             }
             @if let Some(preserved) = &inspection.preserved {
-                (preserved_refs(preserved))
+                (preserved_refs(preserved, mirror.as_deref()))
             }
             @if let Some(clone) = clone {
-            div .clone-line {
-                code .clone { (clone) }
-                button .icon-button type="button" data-copy=(clone)
-                    aria-label="Copy clone command" title="Copy" {
-                    (icon_copy())
-                    (icon_check())
-                }
-            }
+                (clone_line(&clone, "clone", "Copy clone command"))
             }
         }
     }
@@ -630,9 +624,25 @@ fn reason(state: &RepoState) -> Markup {
     }
 }
 
+/// A ready-to-copy git command, in a `code` of class `class`, with a copy
+/// button labelled `label`.
+fn clone_line(command: &str, class: &str, label: &str) -> Markup {
+    html! {
+        div .clone-line {
+            code class=(class) { (command) }
+            button .icon-button type="button" data-copy=(command)
+                aria-label=(label) title="Copy" {
+                (icon_copy())
+                (icon_check())
+            }
+        }
+    }
+}
+
 /// How many refs the archive preserved from before rewrites, expanding to
-/// their names and SHAs.
-fn preserved_refs(preserved: &BTreeMap<String, String>) -> Markup {
+/// their names and SHAs and, when the archive can be cloned, the `mirror`
+/// clone command that brings them along.
+fn preserved_refs(preserved: &BTreeMap<String, String>, mirror: Option<&str>) -> Markup {
     let label = html! {
         (icon_history())
         span { span .count { (preserved.len()) } " preserved ref" @if preserved.len() != 1 { "s" } }
@@ -647,6 +657,10 @@ fn preserved_refs(preserved: &BTreeMap<String, String>) -> Markup {
                     @for (name, sha) in preserved {
                         li { code .ref { (name) } (short_sha(sha)) }
                     }
+                }
+                @if let Some(mirror) = mirror {
+                    p .mirror-note { "A mirror clone includes the preserved refs:" }
+                    (clone_line(mirror, "mirror", "Copy mirror clone command"))
                 }
             }
         }
