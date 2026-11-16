@@ -461,8 +461,6 @@ pub fn edit_repo_list(
         .map_err(EditError::Io)?;
     let (text, config) = read_for_edit(&path)?;
 
-    let same_archive =
-        |repo: &str, id: &RepoId| RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id));
     let (edited, expected) = match change {
         RepoListChange::Add { url, id } => {
             refuse_if_tracked(&config, id)?;
@@ -474,7 +472,7 @@ pub fn edit_repo_list(
             let expected: Vec<String> = config
                 .repos
                 .iter()
-                .filter(|repo| !same_archive(repo, id))
+                .filter(|repo| !shares_archive(repo, id))
                 .cloned()
                 .collect();
             if expected.len() == config.repos.len() {
@@ -482,7 +480,7 @@ pub fn edit_repo_list(
                 return Ok(Edited::NotListed);
             }
             (
-                remove_entries(&text, |repo| same_archive(repo, id)),
+                remove_entries(&text, |repo| shares_archive(repo, id)),
                 expected,
             )
         }
@@ -590,6 +588,11 @@ fn remove_formatted(array: &mut Array, index: usize) {
     }
 }
 
+/// Whether the config entry `repo` has the archive of `id`.
+fn shares_archive(repo: &str, id: &RepoId) -> bool {
+    RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id))
+}
+
 /// The config's text and contents.
 fn read_for_edit(path: &Path) -> Result<(String, Config), EditError> {
     let text = std::fs::read_to_string(path)
@@ -602,10 +605,7 @@ fn read_for_edit(path: &Path) -> Result<(String, Config), EditError> {
 /// Refuses a repo whose archive the config already tracks. URLs differing
 /// only in scheme share an archive, so they count as the same repo.
 fn refuse_if_tracked(config: &Config, id: &RepoId) -> Result<(), EditError> {
-    let tracked = config
-        .repos
-        .iter()
-        .find(|repo| RepoId::from_url(repo).is_ok_and(|other| other.same_archive(id)));
+    let tracked = config.repos.iter().find(|repo| shares_archive(repo, id));
     match tracked {
         Some(existing) => Err(EditError::AlreadyTracked(existing.clone())),
         None => Ok(()),
