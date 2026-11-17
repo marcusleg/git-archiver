@@ -32,9 +32,6 @@ struct Behaviour {
     served: PathBuf,
     /// Repos that fail instead of being served, by request path prefix.
     failing: Mutex<HashMap<String, Failure>>,
-    /// Repos, by request path prefix, that list their refs but hang when
-    /// asked for objects.
-    hung_transfers: Mutex<Vec<String>>,
     hung_requests: AtomicUsize,
     /// When set, every request must carry this token as its HTTP basic auth
     /// password, the way a git host checks an access token.
@@ -62,6 +59,8 @@ pub enum Failure {
     ServerError,
     /// Never answers.
     Hang,
+    /// Lists refs as usual, then never answers a request for objects.
+    HangTransfer,
 }
 
 pub const DMCA_MESSAGE: &str = "Repository unavailable due to DMCA takedown.";
@@ -84,7 +83,6 @@ impl FakeForge {
         let behaviour = Arc::new(Behaviour {
             served: dir.path().join("served"),
             failing: Mutex::default(),
-            hung_transfers: Mutex::default(),
             hung_requests: AtomicUsize::new(0),
             required_token: Mutex::default(),
             authorizations: Mutex::default(),
@@ -113,11 +111,7 @@ impl FakeForge {
     /// answer when a fetch asks for objects: far enough into a first clone
     /// that the archive exists. Until [`Self::restore`].
     pub fn hang_transfer(&self, path: &str) {
-        self.behaviour
-            .hung_transfers
-            .lock()
-            .unwrap()
-            .push(format!("/{path}.git/"));
+        self.fail(path, Failure::HangTransfer);
     }
 
     /// Makes every request for the repo at `path` fail this way, until
@@ -127,18 +121,12 @@ impl FakeForge {
             .failing
             .lock()
             .unwrap()
-            .insert(format!("/{path}.git/"), failure);
+            .insert(prefix(path), failure);
     }
 
     /// Serves the repo at `path` normally again.
     pub fn restore(&self, path: &str) {
-        let prefix = format!("/{path}.git/");
-        self.behaviour.failing.lock().unwrap().remove(&prefix);
-        self.behaviour
-            .hung_transfers
-            .lock()
-            .unwrap()
-            .retain(|hung| *hung != prefix);
+        self.behaviour.failing.lock().unwrap().remove(&prefix(path));
     }
 
     /// Stops answering altogether: connections to the forge are refused
@@ -173,7 +161,7 @@ impl FakeForge {
             .redirects
             .lock()
             .unwrap()
-            .push((format!("/{path}.git/"), format!("{}/", to.url())));
+            .push((prefix(path), format!("{}/", to.url())));
     }
 
     /// Every `Authorization` header the forge has received.
@@ -332,7 +320,10 @@ async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request)
             .find(|(prefix, _)| parts.uri.path().starts_with(prefix.as_str()))
             .map(|(_, failure)| *failure)
     };
-    if let Some(failure) = failure {
+    // A hung transfer is only decided once the request body is known.
+    if let Some(failure) = failure
+        && failure != Failure::HangTransfer
+    {
         return fail(&behaviour, failure).await;
     }
     let redirect = {
@@ -365,14 +356,8 @@ async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request)
             .unwrap();
     }
     let body = to_bytes(body, usize::MAX).await.unwrap();
-    let hung_transfer = behaviour
-        .hung_transfers
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|prefix| parts.uri.path().starts_with(prefix.as_str()));
     // Asking for objects sends `want` lines; listing refs doesn't.
-    if hung_transfer && body.windows(5).any(|w| w == b"want ") {
+    if failure == Some(Failure::HangTransfer) && body.windows(5).any(|w| w == b"want ") {
         return fail(&behaviour, Failure::Hang).await;
     }
 
@@ -411,6 +396,11 @@ async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request)
     cgi_response(&output.stdout)
 }
 
+/// The request path prefix of the repo at `path`.
+fn prefix(path: &str) -> String {
+    format!("/{path}.git/")
+}
+
 async fn fail(behaviour: &Behaviour, failure: Failure) -> Response {
     let (status, body) = match failure {
         Failure::DmcaTakedown => (
@@ -427,7 +417,7 @@ async fn fail(behaviour: &Behaviour, failure: Failure) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal server error\n".to_owned(),
         ),
-        Failure::Hang => {
+        Failure::Hang | Failure::HangTransfer => {
             behaviour.hung_requests.fetch_add(1, Ordering::SeqCst);
             std::future::pending::<()>().await;
             unreachable!()
