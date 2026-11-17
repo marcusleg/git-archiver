@@ -682,7 +682,7 @@ fn date(at: SystemTime) -> Markup {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][month.parse::<usize>().expect("RFC 3339 has a month") - 1];
     let day = day.trim_start_matches('0');
-    time_element(at, &format!("{day} {month} {year}"))
+    time_element(at, &format!("{day} {month} {year}"), false)
 }
 
 /// `<scheme>://<host>[:<port>]` as the browser reached the app, which is how
@@ -761,12 +761,7 @@ fn short_sha(sha: &str) -> Markup {
 /// hover. `data-ago` lets the page's script count it up while the page is
 /// open.
 fn time(then: SystemTime, now: SystemTime) -> Markup {
-    let exact = humantime::format_rfc3339_seconds(then).to_string();
-    html! {
-        time datetime=(exact) title=(exact_title(&exact)) data-ago {
-            (time_ago(then, now))
-        }
-    }
+    time_element(then, &time_ago(then, now), true)
 }
 
 /// [`time`] for `then`, or "Never" without one.
@@ -777,19 +772,15 @@ fn time_or_never(then: Option<SystemTime>, now: SystemTime) -> Markup {
     }
 }
 
-/// A `<time>` for `at` showing `text`, with the exact UTC time on hover.
-fn time_element(at: SystemTime, text: &str) -> Markup {
+/// A `<time>` for `at` showing `text`, with the exact UTC time on hover,
+/// marked `data-ago` if `text` says how long ago `at` was.
+fn time_element(at: SystemTime, text: &str, ago: bool) -> Markup {
     let exact = humantime::format_rfc3339_seconds(at).to_string();
     html! {
-        time datetime=(exact) title=(exact_title(&exact)) {
+        time datetime=(exact) title=(exact.replace('T', " ").replace('Z', " UTC")) data-ago[ago] {
             (text)
         }
     }
-}
-
-/// An RFC 3339 UTC time as people read it: "2026-10-23 14:05:00 UTC".
-fn exact_title(rfc3339: &str) -> String {
-    rfc3339.replace('T', " ").replace('Z', " UTC")
 }
 
 /// How long ago `then` was, in words. The page's script ([`SCRIPT`]) words it

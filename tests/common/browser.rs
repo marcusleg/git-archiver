@@ -175,7 +175,7 @@ impl Browser {
         // The page only loads while its clock runs, so run it in small steps
         // until it has.
         tab.wait_until("the page to load", || async {
-            tab.let_time_pass_by(VirtualTimePolicy::PauseIfNetworkFetchesPending, LOAD_STEP)
+            tab.run_clock(VirtualTimePolicy::PauseIfNetworkFetchesPending, LOAD_STEP)
                 .await;
             let loaded = "location.href !== 'about:blank' && document.readyState === 'complete'";
             let loaded = tab.page.evaluate(loaded).await.ok()?;
@@ -285,7 +285,9 @@ impl Tab {
         None
     }
 
-    /// The text of every `<time>` on the page, without repeats.
+    /// The text of every `<time>` on the page, without repeats, so the same
+    /// time shown in two places is read once. A copy that went stale still
+    /// shows up, as a second text.
     pub async fn times(&self) -> BTreeSet<String> {
         let times: Vec<String> = self
             .page
@@ -300,10 +302,11 @@ impl Tab {
     /// Moves the clock of a tab opened with [`Browser::open_at`] forward by
     /// `by`, running every timer that comes due on the way, and stops it again.
     pub async fn let_time_pass(&self, by: Duration) {
-        self.let_time_pass_by(VirtualTimePolicy::Advance, by).await;
+        self.run_clock(VirtualTimePolicy::Advance, by).await;
     }
 
-    async fn let_time_pass_by(&self, policy: VirtualTimePolicy, by: Duration) {
+    /// Runs the page's clock for `by` under `policy`, then stops it.
+    async fn run_clock(&self, policy: VirtualTimePolicy, by: Duration) {
         let mut stopped = self
             .page
             .event_listener::<EventVirtualTimeBudgetExpired>()
