@@ -360,3 +360,102 @@ async fn a_repo_not_fetched_yet_shows_no_last_success_field() {
     let card = &select(&html, "main article")[0];
     assert_no_field(card, "Last success");
 }
+
+/// The repo names on the cards of the section headed `heading`, in page
+/// order.
+fn section_repos(html: &Html, heading: &str) -> Vec<String> {
+    let article = Selector::parse("article .repo-url").unwrap();
+    for section in select(html, "main section") {
+        let h2 = section.select(&Selector::parse("h2").unwrap()).next();
+        if h2.is_some_and(|h2| text(&h2).starts_with(heading)) {
+            return section.select(&article).map(|r| text(&r)).collect();
+        }
+    }
+    Vec::new()
+}
+
+#[tokio::test]
+async fn tracked_repos_show_sorted_by_identity_whatever_the_config_order() {
+    let urls = [
+        "https://gitlab.com/group/project",
+        "https://github.com/foo/zed",
+        "https://github.com/foo/bar",
+    ];
+    let app = TestApp::tracking(&urls).await;
+
+    let html = Html::parse_document(&app.get("/").await.text());
+    assert_eq!(
+        section_repos(&html, "Tracked repos"),
+        [urls[2], urls[1], urls[0]]
+    );
+}
+
+#[tokio::test]
+async fn identities_sort_case_insensitively_and_the_exact_string_breaks_ties() {
+    let urls = [
+        "https://github.com/zed/repo",
+        "https://github.com/NixOS/nixpkgs",
+        "https://github.com/foo/bar",
+        "https://github.com/nixos/Nixpkgs",
+        "https://github.com/Foo/bar",
+    ];
+    let app = TestApp::tracking(&urls).await;
+
+    let html = Html::parse_document(&app.get("/").await.text());
+    assert_eq!(
+        section_repos(&html, "Tracked repos"),
+        [urls[4], urls[2], urls[1], urls[3], urls[0]]
+    );
+}
+
+#[tokio::test]
+async fn the_scheme_plays_no_part_in_the_order() {
+    let urls = [
+        "https://example.com/c",
+        "http://example.com/b",
+        "https://example.com/a",
+        "http://example.com/d",
+    ];
+    let app = TestApp::tracking(&urls).await;
+
+    let html = Html::parse_document(&app.get("/").await.text());
+    assert_eq!(
+        section_repos(&html, "Tracked repos"),
+        [urls[2], urls[1], urls[0], urls[3]]
+    );
+}
+
+#[tokio::test]
+async fn untracked_archives_show_sorted_the_same_way() {
+    let app = TestApp::start().await;
+    for archive in [
+        "example.com/Zed",
+        "example.com/nixos/nixpkgs",
+        "example.com/Alpha",
+    ] {
+        std::fs::create_dir_all(app.archive(archive)).unwrap();
+    }
+
+    let html = Html::parse_document(&app.get("/").await.text());
+    assert_eq!(
+        section_repos(&html, "Untracked archives"),
+        [
+            "https://example.com/Alpha",
+            "https://example.com/nixos/nixpkgs",
+            "https://example.com/Zed",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn sorting_the_page_leaves_the_config_file_unchanged() {
+    let config = r#"repos = [
+  "https://github.com/zed/repo",
+  "https://github.com/foo/bar",
+]
+"#;
+    let app = TestApp::with_config(config).await;
+
+    app.get("/").await;
+    assert_eq!(app.config(), config);
+}
