@@ -259,6 +259,36 @@ async fn on_a_desktop_selecting_rows_keeps_the_scroll_and_moves_through_the_hist
     selected("b/r30").await;
 }
 
+/// Clicking a row shows the repo's page: on a desktop by swapping it into
+/// the open page, on a phone, which shows the list and each repo on pages
+/// of their own, by a plain navigation.
+async fn clicking_a_row_shows_the_repos_page(viewport: Viewport) {
+    let (forge, app, [_one, two]) = app_tracking_two_repos().await;
+    let browser = Browser::launch(viewport).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.mark_document().await;
+
+    tab.click_row("a/two").await;
+    tab.arrives_at(&format!("/repos/{}/a/two", forge.host()))
+        .await;
+    tab.sees(&two).await;
+
+    match viewport {
+        Viewport::Desktop => tab.still_shows_the_marked_document().await,
+        Viewport::Phone => tab.shows_a_new_document().await,
+    }
+}
+
+#[tokio::test]
+async fn on_a_desktop_clicking_a_row_selects_it_in_place() {
+    clicking_a_row_shows_the_repos_page(Viewport::Desktop).await;
+}
+
+#[tokio::test]
+async fn on_a_phone_clicking_a_row_navigates() {
+    clicking_a_row_shows_the_repos_page(Viewport::Phone).await;
+}
+
 #[tokio::test]
 async fn on_a_phone_the_list_and_each_repos_card_get_a_page_of_their_own() {
     let (forge, app, [one, two]) = app_tracking_two_repos().await;
@@ -467,6 +497,32 @@ async fn an_update_keeps_the_selection_the_scroll_position_and_a_failed_action_b
     );
     assert_eq!(tab.shown(".pane .repo-url").await, [urls[31].clone()]);
     assert_eq!(tab.scroll_y().await, scrolled);
+}
+
+#[tokio::test]
+async fn an_update_keeps_open_preserved_refs_open_and_the_keyboard_focus() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    upstream.force_push_new_history("second");
+    app.advance_and_settle(24 * HOUR).await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.click_summary("1 preserved ref").await;
+    tab.sees("A mirror clone includes the preserved refs").await;
+    tab.focus_button("Copy mirror clone command").await;
+    tab.mark_document().await;
+
+    // Another rewrite, which the page shows without a reload.
+    upstream.force_push_new_history("third");
+    app.advance_and_settle(24 * HOUR).await;
+    tab.sees("2 preserved refs").await;
+
+    tab.still_shows_the_marked_document().await;
+    tab.sees("A mirror clone includes the preserved refs").await;
+    assert_eq!(tab.focused().await, "Copy mirror clone command");
 }
 
 #[tokio::test]

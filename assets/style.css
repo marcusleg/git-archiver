@@ -237,7 +237,8 @@ main {
 }
 
 /* Below 60rem one column: the list page shows only the list, and a repo's
-   page shows only "All repos" and the card. */
+   page shows only "All repos" and the card. The page script tells this
+   layout by its single column, so a row there navigates as a plain link. */
 @media (max-width: 60rem) {
   .columns {
     grid-template-columns: minmax(0, 1fr);
