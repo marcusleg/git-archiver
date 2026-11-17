@@ -24,7 +24,7 @@ use crate::clock::Clock;
 use crate::git_http;
 use crate::identity::RepoId;
 use crate::metrics;
-use crate::overview::{RepoView, SharedOverview};
+use crate::overview::{RepoView, SharedOverview, View};
 use crate::state::{RepoState, Status};
 use crate::tracking::{ArchiveChoice, TrackOutcome, Tracking, UntrackOutcome};
 
@@ -79,7 +79,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     let on_disk = state.archives.list().await;
     let view = state.overview.view(&on_disk);
     let mut preserved_refs = BTreeMap::new();
-    for repo in &view.repos {
+    for repo in view.repos() {
         let id = &repo.id;
         match state.archives.preserved(id).await {
             Ok(Some(refs)) => {
@@ -432,18 +432,24 @@ async fn render_page(
     base: &str,
 ) -> Option<Html<String>> {
     let on_disk = app.archives.list().await;
-    let view = app.overview.view(&on_disk);
-    let config_error = view.config_error;
+    let mut view = app.overview.view(&on_disk);
+    view.tracked.sort_by(display_order);
+    view.untracked.sort_by(display_order);
     let selected = match page {
-        Page::Repo(id) => Some(view.repos.iter().find(|r| &r.id == id)?),
-        Page::List => view.repos.iter().find(|r| r.tracked),
+        Page::Repo(id) => Some(view.repos().find(|r| &r.id == id)?),
+        Page::List => view.tracked.first(),
     };
     let selected = match selected {
         Some(repo) => Some(card_view(app, repo).await),
         None => None,
     };
     let selected_id = selected.as_ref().map(|card| &card.id);
-    let (tracked, untracked): (Vec<_>, Vec<_>) = view.repos.into_iter().partition(|r| r.tracked);
+    let View {
+        tracked,
+        untracked,
+        config_error,
+        ..
+    } = view;
     let now = app.clock.now();
 
     Some(Html(
@@ -520,6 +526,15 @@ async fn render_page(
         )
         .into_string(),
     ))
+}
+
+/// Display order: by `<host>/<path>` compared case-insensitively, the exact
+/// string breaking ties. The scheme plays no part.
+fn display_order(a: &RepoView, b: &RepoView) -> std::cmp::Ordering {
+    let (a, b) = (a.id.host_and_path(), b.id.host_and_path());
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| a.cmp(b))
 }
 
 /// A table of repos, one row each, marking the row of the repo the pane

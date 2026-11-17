@@ -167,3 +167,30 @@ async fn metrics_count_preserved_refs_per_repo_and_rewrites() {
     assert_eq!(metrics.value(preserved, &labels), Some(3.0));
     assert_eq!(metrics.value("archiver_rewrites_total", &[]), Some(2.0));
 }
+
+#[tokio::test]
+async fn per_repo_series_follow_the_config_order_then_untracked_archives() {
+    let app = TestApp::tracking(&[
+        "https://example.com/zeta/one",
+        "https://example.com/Alpha/two",
+    ])
+    .await;
+    std::fs::create_dir_all(app.archive("example.com/beta/three")).unwrap();
+
+    let metrics = app.metrics().await;
+    let repos: Vec<&str> = metrics
+        .samples()
+        .iter()
+        .filter(|s| s.name == "archiver_repo_tracked")
+        .map(|s| s.labels[0].1.as_str())
+        .collect();
+    assert_eq!(
+        repos,
+        [
+            "https://example.com/zeta/one",
+            "https://example.com/Alpha/two",
+            "https://example.com/beta/three",
+        ],
+        "config order, not identity order"
+    );
+}

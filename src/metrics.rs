@@ -16,8 +16,7 @@ pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 pub fn render(overview: &View, preserved_refs: &BTreeMap<String, usize>) -> String {
     // Each repo with whether it's tracked and its state, if it has any.
     let repos: Vec<(&RepoId, bool, Option<&RepoState>)> = overview
-        .repos
-        .iter()
+        .repos()
         .map(|r| (&r.id, r.tracked, r.state.as_ref()))
         .collect();
     let per_repo = |value: fn(&RepoState) -> Option<f64>| {
