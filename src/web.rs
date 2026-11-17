@@ -563,33 +563,60 @@ fn repo_row(repo: &RepoView, selected: bool, now: SystemTime) -> Markup {
     }
 }
 
-/// A repo's status as an icon and a short label, for its row.
-fn status_label(state: &RepoState) -> Markup {
-    match state.status {
-        Some(Status::Available) => html! {
-            span .status.available { (icon_circle_check()) span .label { "Available" } }
+/// How a status looks: the one place that maps it to its icon, CSS class
+/// and short label. `None` is a repo that hasn't been fetched yet.
+struct StatusView {
+    icon: Markup,
+    class: &'static str,
+    label: &'static str,
+}
+
+fn status_view(status: Option<Status>) -> StatusView {
+    match status {
+        Some(Status::Available) => StatusView {
+            icon: icon_circle_check(),
+            class: "status available",
+            label: "Available",
         },
-        Some(Status::Unavailable) => html! {
-            span .status.unavailable {
-                (icon_ban())
-                span .label {
-                    "Unavailable"
-                    @if let Some(http_status) = state.http_status { " · " (http_status) }
-                }
-            }
+        Some(Status::Unavailable) => StatusView {
+            icon: icon_ban(),
+            class: "status unavailable",
+            label: "Unavailable",
         },
-        Some(Status::FetchFailed) => html! {
-            span .status.fetch-failed { (icon_refresh_cw_off()) span .label { "Fetch failed" } }
+        Some(Status::FetchFailed) => StatusView {
+            icon: icon_refresh_cw_off(),
+            class: "status fetch-failed",
+            label: "Fetch failed",
         },
-        None => html! {
-            span .status { (icon_clock()) span .label { "Not fetched yet" } }
+        None => StatusView {
+            icon: icon_clock(),
+            class: "status",
+            label: "Not fetched yet",
         },
     }
 }
 
+/// A repo's status as an icon and a short label, for its row.
+fn status_label(state: &RepoState) -> Markup {
+    let StatusView { icon, class, label } = status_view(state.status);
+    html! {
+        span class=(class) {
+            (icon)
+            span .label {
+                (label)
+                @if state.status == Some(Status::Unavailable) {
+                    @if let Some(http_status) = state.http_status { " · " (http_status) }
+                }
+            }
+        }
+    }
+}
+
+const UNTRACK_DIALOG: &str = "untrack";
+
 /// The untrack button and its confirmation dialog.
 fn untrack_dialog(id: &RepoId) -> Markup {
-    let dialog = "untrack";
+    let dialog = UNTRACK_DIALOG;
     html! {
         button .button.secondary.small type="button" commandfor=(dialog)
             command="show-modal" aria-haspopup="dialog" { "Untrack" }
@@ -685,22 +712,25 @@ fn repo_card(card: &CardView, base: &str, now: SystemTime) -> Markup {
     // The status line, and whether the facts add "Last success": an
     // Available repo's status line already says when, and otherwise there
     // is no success to show.
-    let (status_line, show_last_success) = match (state.status, state.last_success) {
+    // An Available repo with no recorded success reads as not fetched yet.
+    let shown = match (state.status, state.last_success) {
+        (Some(Status::Available), None) => None,
+        (status, _) => status,
+    };
+    let StatusView { icon, class, label } = status_view(shown);
+    let (status_line, show_last_success) = match (shown, state.last_success) {
         (Some(Status::Available), Some(success)) => (
             html! {
-                p .status.available {
-                    (icon_circle_check())
-                    span { "Fetched " (time(success, now)) }
-                }
+                p class=(class) { (icon) span { "Fetched " (time(success, now)) } }
             },
             false,
         ),
         (Some(Status::Unavailable), _) => (
             html! {
-                p .status.unavailable {
-                    (icon_ban())
+                p class=(class) {
+                    (icon)
                     span {
-                        "Unavailable"
+                        (label)
                         @if let Some(since) = state.status_since {
                             " since " (date(since))
                         }
@@ -715,20 +745,14 @@ fn repo_card(card: &CardView, base: &str, now: SystemTime) -> Markup {
         ),
         (Some(Status::FetchFailed), _) => (
             html! {
-                p .status.fetch-failed {
-                    (icon_refresh_cw_off())
-                    span { "Fetch failed" }
-                }
+                p class=(class) { (icon) span { (label) } }
                 (reason(state))
             },
             true,
         ),
         _ => (
             html! {
-                p .status {
-                    (icon_clock())
-                    span { "Not fetched yet" }
-                }
+                p class=(class) { (icon) span { (label) } }
             },
             false,
         ),
