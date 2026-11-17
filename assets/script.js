@@ -189,12 +189,14 @@ if (main) {
     }
     update();
   };
-  // Whether the stylesheet lays the page out in one column, giving the list
-  // and each repo a page of their own. The stylesheet alone knows the width
-  // where that starts.
+  // Whether the stylesheet gives the list and each repo a page of their own,
+  // which it says by hiding the list page's pane. The stylesheet alone knows
+  // the width where that starts. Rows can only be clicked on the list page
+  // then, since a repo's page hides the list. A list page without a pane
+  // (no tracked repo) can't tell, so its rows navigate, which always works.
   const narrow = (row) => {
-    const columns = getComputedStyle(row.closest(".columns")).gridTemplateColumns;
-    return columns.split(" ").length < 2;
+    const pane = row.closest(".columns").querySelector(".pane");
+    return !pane || getComputedStyle(pane).display === "none";
   };
   document.addEventListener("click", (event) => {
     const link = event.target.closest(".row-link");
