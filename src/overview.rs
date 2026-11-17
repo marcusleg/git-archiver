@@ -14,18 +14,18 @@ pub type SharedOverview = Arc<Overview>;
 
 /// What the app remembers about its archives, shared between the scheduler,
 /// the web UI and `/metrics`. It owns its lock, saves the state itself
-/// whenever it changes, and tells whoever watches when something the list
-/// page shows changed.
+/// whenever it changes, and tells whoever watches when something the pages
+/// show changed.
 #[derive(Debug)]
 pub struct Overview {
     inner: Mutex<Inner>,
     save_lock: Mutex<()>,
     state_path: PathBuf,
-    /// Sent to after each change the list page shows.
+    /// Sent to after each change the pages show.
     changes: watch::Sender<()>,
 }
 
-/// Notices of changes to what the list page shows, from [`Overview::changes`].
+/// Notices of changes to what the pages show, from [`Overview::changes`].
 pub struct Changes(watch::Receiver<()>);
 
 impl Changes {
@@ -122,7 +122,7 @@ impl Overview {
         })
     }
 
-    /// Watches for changes to what the list page shows: a fetch result, the
+    /// Watches for changes to what the pages show: a fetch result, the
     /// tracked list, the config error, or an untracked archive deleted.
     /// Only changes after this call count.
     pub fn changes(&self) -> Changes {
@@ -437,4 +437,45 @@ pub fn tracked(urls: &[String]) -> Vec<Tracked> {
         }
     }
     tracked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An Overview tracking `urls`, saving its state in a fresh directory.
+    fn overview(urls: &[String]) -> (tempfile::TempDir, SharedOverview) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.json");
+        (dir, Overview::new(tracked(urls), State::default(), path))
+    }
+
+    /// Whether `changes` has a change waiting, without waiting for one.
+    async fn announced(changes: &mut Changes) -> bool {
+        tokio::time::timeout(Duration::ZERO, changes.changed())
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn deleting_an_untracked_archive_is_announced() {
+        let (_dir, overview) = overview(&[]);
+        let mut changes = overview.changes();
+        overview.forget(&RepoId::from_url("https://example.com/a/one").unwrap());
+        assert!(announced(&mut changes).await);
+    }
+
+    #[tokio::test]
+    async fn only_a_changed_tracked_list_is_announced() {
+        let one = "https://example.com/a/one".to_owned();
+        let (_dir, overview) = overview(std::slice::from_ref(&one));
+        let mut changes = overview.changes();
+
+        overview.set_tracked(std::slice::from_ref(&one));
+        assert!(!announced(&mut changes).await, "the same list");
+
+        // Another spelling of the same repo shows another title.
+        overview.set_tracked(&["http://example.com/a/one".to_owned()]);
+        assert!(announced(&mut changes).await, "the URL as written changed");
+    }
 }

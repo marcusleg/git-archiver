@@ -382,7 +382,7 @@ pub struct Events {
 
 /// What the event stream sent: an event, or a comment such as a heartbeat.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Sent {
+enum Sent {
     /// An event, by its fields as sent, e.g. `["event: changed", "data:"]`.
     Event(Vec<String>),
     Comment,
@@ -397,45 +397,44 @@ impl Events {
             .map(|v| v.to_str().expect("header is text"))
     }
 
-    /// Waits for the next `changed` event, skipping comments, and fails the
-    /// test if none comes within [`EVENT_PATIENCE`]. The event carries
-    /// nothing but its name and the empty data browsers need to see it.
+    /// Waits for the next `changed` event, and fails the test if none comes
+    /// within [`EVENT_PATIENCE`]. The event carries nothing but its name and
+    /// the empty data browsers need to see it.
     pub async fn changed(&mut self) {
-        let deadline = Instant::now() + EVENT_PATIENCE;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.next_within(left).await {
-                Some(Sent::Event(fields)) => {
-                    assert_eq!(
-                        fields,
-                        ["event: changed", "data:"],
-                        "a `changed` event, empty"
-                    );
-                    return;
-                }
-                Some(Sent::Comment) => {}
-                None => panic!("no `changed` event within {EVENT_PATIENCE:?}"),
-            }
+        let fields = self
+            .next_event_within(EVENT_PATIENCE)
+            .await
+            .unwrap_or_else(|| panic!("no `changed` event within {EVENT_PATIENCE:?}"));
+        assert_eq!(
+            fields,
+            ["event: changed", "data:"],
+            "a `changed` event, empty"
+        );
+    }
+
+    /// Fails the test if an event arrives within `wait`.
+    pub async fn stays_quiet_for(&mut self, wait: Duration) {
+        if let Some(fields) = self.next_event_within(wait).await {
+            panic!("unexpected event: {fields:?}");
         }
     }
 
-    /// Fails the test if an event arrives within `wait`. Comments don't
-    /// count.
-    pub async fn stays_quiet_for(&mut self, wait: Duration) {
+    /// The fields of the next event, skipping comments, or `None` if none
+    /// arrives within `wait`.
+    async fn next_event_within(&mut self, wait: Duration) -> Option<Vec<String>> {
         let deadline = Instant::now() + wait;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            match self.next_within(left).await {
-                Some(Sent::Event(fields)) => panic!("unexpected event: {fields:?}"),
-                Some(Sent::Comment) => {}
-                None => return,
+            match self.next_within(left).await? {
+                Sent::Event(fields) => return Some(fields),
+                Sent::Comment => {}
             }
         }
     }
 
     /// The next event or comment, or `None` if nothing complete arrives
     /// within `wait`.
-    pub async fn next_within(&mut self, wait: Duration) -> Option<Sent> {
+    async fn next_within(&mut self, wait: Duration) -> Option<Sent> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             if let Some(end) = self.buffer.find("\n\n") {

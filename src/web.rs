@@ -102,8 +102,8 @@ const CHANGED: &str = "event: changed\ndata:\n\n";
 
 const X_ACCEL_BUFFERING: header::HeaderName = header::HeaderName::from_static("x-accel-buffering");
 
-/// Server-Sent Events: a `changed` event after each change to what the list
-/// page shows, and a comment every [`HEARTBEAT`]. No repo data goes over the
+/// Server-Sent Events: a `changed` event after each change to what the
+/// pages show, and a comment every [`HEARTBEAT`]. No repo data goes over the
 /// stream; the page fetches what changed itself. `X-Accel-Buffering: no`
 /// asks nginx to pass events on as they come rather than buffer them. The
 /// stream ends when the app shuts down.
@@ -112,11 +112,11 @@ async fn events(State(app): State<Arc<AppState>>) -> Response {
         changes.changed().await;
         Some((CHANGED, changes))
     });
-    let mut every = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT, HEARTBEAT);
-    every.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let heartbeat = stream::unfold(every, |mut every| async move {
-        every.tick().await;
-        Some((":\n\n", every))
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT, HEARTBEAT);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let heartbeat = stream::unfold(ticks, |mut ticks| async move {
+        ticks.tick().await;
+        Some((":\n\n", ticks))
     });
     let body = stream::select(changed, heartbeat)
         .map(Ok::<_, Infallible>)
@@ -1009,9 +1009,9 @@ fn format_size(bytes: u64) -> String {
     format!("{value:.1} {unit}")
 }
 
-/// A page of the app titled `title`, around `content`. With a `live` path,
+/// A page of the app titled `title`, around `content`. With a `live_path`,
 /// the page's script keeps `content` up to date from that path.
-fn layout(title: &str, live: Option<&str>, content: Markup) -> Markup {
+fn layout(title: &str, live_path: Option<&str>, content: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -1028,7 +1028,7 @@ fn layout(title: &str, live: Option<&str>, content: Markup) -> Markup {
                 header .app-header {
                     a .brand href="/" { "Git Archiver" }
                 }
-                main data-live=[live] { (content) }
+                main data-live=[live_path] { (content) }
                 script { (PreEscaped(SCRIPT)) }
             }
         }
