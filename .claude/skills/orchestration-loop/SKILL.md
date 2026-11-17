@@ -28,6 +28,7 @@ Why separate sessions, not subagents: `/mattpocock-skills:implement` and `mattpo
 - **Running:** an issue with a live worker. Its branch is `issue-<n>-<slug>`, its space is named `#<n> <short title>`, and it is assigned to `@me`.
 - **Review round:** one review of the spec, numbered from 1. Its report is `<root>/<repo>/spec-<spec>-review-<round>.md`, and the report's first line is `Reviewed: <from>..<to>`, the commit range it covered.
 - **Short title:** the issue's subject in two to four words that you choose, rather than its full title. "Untrack repos and list untracked archives" becomes "Untrack repos". The **slug** is the short title in kebab case (`untrack-repos`), and the branch and worktree names use it.
+- **Model:** the model a worker runs on, chosen per issue when you launch it and passed as `--model` in the space's `--argv`. Default `opus`. Use `sonnet` for easy issues: a small, well-specified change in one place, such as a rename, a copy or config tweak, or a one-test fix. Use `fable` for very hard issues: a large cross-cutting change, a subtle concurrency or correctness problem, or a design the issue leaves open. When unsure, use `opus`. Reviewers always run `opus`. Say the model you picked for each issue when you report its launch.
 - **Frontier:** issues that are neither blocked, running, nor assigned to someone.
 
 ## 0. Preconditions
@@ -82,7 +83,7 @@ Run `git fetch origin`, compute the frontier, and launch every issue in it. Ther
 3. Start the worker:
    ```bash
    herdr-app do space.new --name "#<n> <short title>" --folder <worktree> \
-     --argv '["claude"]' --task "<worker prompt>" --focus false
+     --argv '["claude","--model","<model>"]' --task "<worker prompt>" --focus false
    ```
    The reply gives the space ID and terminal address.
 4. Check that the task arrived: `hc read <terminal>` shows the prompt in the transcript. If something on screen is in the way, such as a trust dialog, tell the user rather than typing past it.
