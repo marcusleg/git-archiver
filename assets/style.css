@@ -202,9 +202,10 @@ main {
 
 /* Two columns: the tables on the left, the selected repo's card in a pane
    on the right that stays in view while the list scrolls. Banners sit
-   above both. */
+   above both. `--layout` names the layout for the page script. */
 
 .columns {
+  --layout: wide;
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(24rem, 1fr);
   gap: var(--space-5);
@@ -237,11 +238,12 @@ main {
 }
 
 /* Below 60rem one column: the list page shows only the list, and a repo's
-   page shows only "All repos" and the card. The page script tells this
-   layout by the list page's hidden pane, so a row there navigates as a
-   plain link. */
+   page shows only "All repos" and the card. The page script reads
+   `--layout: narrow` on `.columns` to tell this layout, so a row there
+   navigates as a plain link. */
 @media (max-width: 60rem) {
   .columns {
+    --layout: narrow;
     grid-template-columns: minmax(0, 1fr);
   }
 

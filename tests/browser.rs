@@ -289,6 +289,31 @@ async fn on_a_phone_clicking_a_row_navigates() {
     clicking_a_row_shows_the_repos_page(Viewport::Phone).await;
 }
 
+/// With no tracked repo the list page has no pane, only the untracked
+/// archives below the empty state. On a desktop their rows still select in
+/// place.
+#[tokio::test]
+async fn on_a_desktop_a_list_page_without_a_pane_selects_a_row_in_place() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    let page = format!("/repos/{}/a/one", forge.host());
+    app.untrack_from_page(&page, "Keep archive").await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.sees("Untracked archives").await;
+    tab.mark_document().await;
+
+    tab.click_row("a/one").await;
+    tab.arrives_at(&page).await;
+    // An untracked archive's card shows its identity URL, without `.git`.
+    let archive_url = upstream.url().trim_end_matches(".git");
+    tab.sees(archive_url).await;
+    tab.still_shows_the_marked_document().await;
+}
+
 #[tokio::test]
 async fn on_a_phone_the_list_and_each_repos_card_get_a_page_of_their_own() {
     let (forge, app, [one, two]) = app_tracking_two_repos().await;

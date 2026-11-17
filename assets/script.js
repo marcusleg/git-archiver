@@ -190,14 +190,11 @@ if (main) {
     update();
   };
   // Whether the stylesheet gives the list and each repo a page of their own,
-  // which it says by hiding the list page's pane. The stylesheet alone knows
-  // the width where that starts. Rows can only be clicked on the list page
-  // then, since a repo's page hides the list. A list page without a pane
-  // (no tracked repo) can't tell, so its rows navigate, which always works.
-  const narrow = (row) => {
-    const pane = row.closest(".columns").querySelector(".pane");
-    return !pane || getComputedStyle(pane).display === "none";
-  };
+  // which it says by setting `--layout: narrow` on `.columns`. The
+  // stylesheet alone knows the width where that starts. Rows can only be
+  // clicked on the list page then, since a repo's page hides the list.
+  const narrow = (row) =>
+    getComputedStyle(row.closest(".columns")).getPropertyValue("--layout").trim() === "narrow";
   document.addEventListener("click", (event) => {
     const link = event.target.closest(".row-link");
     if (!link || narrow(link) || event.defaultPrevented || event.button !== 0
