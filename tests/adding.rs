@@ -34,7 +34,7 @@ fn add_dialog(html: &Html) -> ElementRef<'_> {
 /// The "+ Add repo" buttons in `scope`, outside the dialog, each checked to
 /// open the add dialog.
 fn add_buttons<'a>(html: &Html, scope: &ElementRef<'a>) -> Vec<ElementRef<'a>> {
-    let dialog = add_dialog(html)
+    let dialog_id = add_dialog(html)
         .value()
         .attr("id")
         .expect("the dialog has an id")
@@ -52,7 +52,7 @@ fn add_buttons<'a>(html: &Html, scope: &ElementRef<'a>) -> Vec<ElementRef<'a>> {
         .collect();
     for button in &buttons {
         assert_eq!(button.value().attr("type"), Some("button"));
-        assert_eq!(button.value().attr("commandfor"), Some(dialog.as_str()));
+        assert_eq!(button.value().attr("commandfor"), Some(dialog_id.as_str()));
         assert_eq!(button.value().attr("command"), Some("show-modal"));
         assert_eq!(button.value().attr("aria-haspopup"), Some("dialog"));
     }
