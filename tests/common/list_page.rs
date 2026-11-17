@@ -49,11 +49,11 @@ pub struct Row {
     pub selected: bool,
 }
 
-pub struct ArchivePage {
+pub struct AppPage {
     pub html: Html,
 }
 
-impl ArchivePage {
+impl AppPage {
     pub fn parse(text: &str) -> Self {
         Self {
             html: Html::parse_document(text),
@@ -136,13 +136,12 @@ impl ArchivePage {
             .collect()
     }
 
-    /// The form that `selector` finds inside a dialog, after checking it
-    /// posts.
-    pub fn dialog_form(&self, selector: &str) -> ElementRef<'_> {
-        let form = select(&self.html, &format!("dialog {selector}"))
+    /// The first form that `selector` finds, after checking it posts.
+    pub fn post_form(&self, selector: &str) -> ElementRef<'_> {
+        let form = select(&self.html, selector)
             .into_iter()
             .next()
-            .unwrap_or_else(|| panic!("the page has no dialog form {selector:?}"));
+            .unwrap_or_else(|| panic!("the page has no form {selector:?}: {}", self.html.html()));
         assert_eq!(form.value().attr("method"), Some("post"));
         form
     }
