@@ -288,7 +288,14 @@ impl TestApp {
 
     /// The list page, parsed.
     pub async fn list_page(&self) -> list_page::ListPage {
-        list_page::ListPage::parse(&self.get("/").await.text())
+        self.page("/").await
+    }
+
+    /// The page at `path`, parsed, after checking it was found.
+    pub async fn page(&self, path: &str) -> list_page::ListPage {
+        let page = self.get(path).await;
+        assert_eq!(page.status, 200, "GET {path}: {}", page.text());
+        list_page::ListPage::parse(&page.text())
     }
 
     /// Fills in the add form in the list page's add dialog with this URL and

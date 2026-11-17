@@ -17,6 +17,9 @@ use chromiumoxide::cdp::browser_protocol::emulation::{
     VirtualTimePolicy,
 };
 use chromiumoxide::cdp::browser_protocol::network::TimeSinceEpoch;
+use chromiumoxide::cdp::browser_protocol::page::{
+    GetNavigationHistoryParams, NavigateToHistoryEntryParams,
+};
 use chromiumoxide::element::Element;
 use chromiumoxide::handler::viewport::Viewport as EmulatedViewport;
 use chromiumoxide::page::Page;
@@ -469,6 +472,109 @@ impl Tab {
         .await
     }
 
+    /// Clicks the visible table row that mentions `name`, on its status
+    /// cell rather than the repo name, with a real mouse click.
+    pub async fn click_row(&self, name: &str) {
+        let cell = self
+            .wait_until(&format!("a visible row {name:?}"), || async {
+                for row in self.visible("tbody tr").await {
+                    if inner_text(&row).await.contains(name) {
+                        return row.find_element("td:nth-child(2)").await.ok();
+                    }
+                }
+                None
+            })
+            .await;
+        self.click_on(&cell).await;
+    }
+
+    /// Clicks the visible link whose text contains `label`, with a real
+    /// mouse click.
+    pub async fn click_link(&self, label: &str) {
+        let link = self
+            .wait_until(&format!("a visible link {label:?}"), || async {
+                for link in self.visible("a").await {
+                    if inner_text(&link).await.contains(label) {
+                        return Some(link);
+                    }
+                }
+                None
+            })
+            .await;
+        self.click_on(&link).await;
+    }
+
+    /// The text of each element matching `selector` that a person can see.
+    pub async fn shown(&self, selector: &str) -> Vec<String> {
+        let mut texts = Vec::new();
+        for element in self.visible(selector).await {
+            texts.push(inner_text(&element).await);
+        }
+        texts
+    }
+
+    /// The elements matching `selector` that a person can see: rendered, and
+    /// larger than the one-pixel box that hides text for all but screen
+    /// readers.
+    async fn visible(&self, selector: &str) -> Vec<Element> {
+        let js = "function() {
+            const box = this.getBoundingClientRect();
+            return this.checkVisibility() && box.width > 1 && box.height > 1;
+        }";
+        let mut shown = Vec::new();
+        for element in self.page.find_elements(selector).await.unwrap_or_default() {
+            let visible = element
+                .call_js_fn(js, false)
+                .await
+                .ok()
+                .and_then(|r| r.result.value)
+                == Some(true.into());
+            if visible {
+                shown.push(element);
+            }
+        }
+        shown
+    }
+
+    /// Waits until the page's URL has the path `path` and the page there
+    /// has loaded.
+    pub async fn arrives_at(&self, path: &str) {
+        self.wait_until(&format!("the URL path to be {path:?}"), || async {
+            let url = self.page.url().await.ok()??;
+            (url::Url::parse(&url).ok()?.path() == path).then_some(())
+        })
+        .await;
+        self.wait_until("the page to load", || async {
+            // Fails while the old page's context is torn down.
+            let state = self.page.evaluate("document.readyState").await.ok()?;
+            (state.into_value::<String>().ok()? == "complete").then_some(())
+        })
+        .await;
+    }
+
+    /// Goes back one page in the tab's history, as the back button does.
+    pub async fn go_back(&self) {
+        let history = self
+            .page
+            .execute(GetNavigationHistoryParams::default())
+            .await
+            .expect("history")
+            .result;
+        let current = usize::try_from(history.current_index).expect("a history index");
+        assert!(current > 0, "there is no page to go back to");
+        let previous = &history.entries[current - 1];
+        self.page
+            .execute(NavigateToHistoryEntryParams::new(previous.id))
+            .await
+            .expect("going back");
+        self.arrives_at(
+            url::Url::parse(&previous.url)
+                .expect("a history URL")
+                .path(),
+        )
+        .await;
+    }
+
     /// The path of the page shown now, such as `/`.
     pub async fn path(&self) -> String {
         let url = self.page.url().await.expect("page url").expect("a url");
@@ -504,4 +610,14 @@ impl Tab {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+}
+
+/// The text `element` shows, or nothing if it can't be read.
+async fn inner_text(element: &Element) -> String {
+    element
+        .inner_text()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }

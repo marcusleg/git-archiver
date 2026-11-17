@@ -9,7 +9,8 @@ use common::browser::{Browser, Viewport, find_browser_in};
 use common::forge::{Failure, FakeForge};
 use common::{HOUR, MINUTE, TestApp};
 
-/// Opening the untrack dialog and cancelling it leaves the repo tracked.
+/// Opening the untrack dialog on a repo's page and cancelling it leaves the
+/// repo tracked.
 async fn cancelling_untrack_keeps_the_repo_tracked(viewport: Viewport) {
     let forge = FakeForge::start().await;
     let upstream = forge.create_repo("a/one");
@@ -17,6 +18,9 @@ async fn cancelling_untrack_keeps_the_repo_tracked(viewport: Viewport) {
     let app = TestApp::tracking(&[upstream.url()]).await;
     let browser = Browser::launch(viewport).await;
     let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.click_row("a/one").await;
+    tab.arrives_at(&format!("/repos/{}/a/one", forge.host()))
+        .await;
 
     tab.sees(upstream.url()).await;
     tab.doesnt_see("Keep archive").await;
@@ -178,6 +182,112 @@ async fn without_javascript_the_add_dialog_opens_and_its_form_submits() {
     tab.doesnt_see(CLONES_RIGHT_AWAY).await;
     assert_eq!(tab.path().await, "/");
     assert!(app.config().contains(second.url()));
+}
+
+/// A forge with two repos, `a/one` and `a/two`, both tracked and fetched.
+async fn app_tracking_two_repos() -> (FakeForge, TestApp, [String; 2]) {
+    let forge = FakeForge::start().await;
+    let urls = ["a/one", "a/two"].map(|path| {
+        let upstream = forge.create_repo(path);
+        upstream.commit("first");
+        upstream.url().to_owned()
+    });
+    let app = TestApp::tracking(&[&urls[0], &urls[1]]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    (forge, app, urls)
+}
+
+#[tokio::test]
+async fn clicking_a_row_on_a_desktop_shows_that_repo_in_the_pane() {
+    let (forge, app, [one, two]) = app_tracking_two_repos().await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.sees("Tracked repos").await;
+    tab.sees(&one).await;
+    tab.doesnt_see(&two).await;
+
+    tab.click_row("a/two").await;
+
+    let page = format!("/repos/{}/a/two", forge.host());
+    tab.arrives_at(&page).await;
+    tab.sees(&two).await;
+    tab.doesnt_see(&one).await;
+    tab.sees("Tracked repos").await;
+    tab.doesnt_see("All repos").await;
+
+    tab.go_back().await;
+    tab.sees(&one).await;
+    tab.doesnt_see(&two).await;
+}
+
+#[tokio::test]
+async fn on_a_phone_the_list_and_each_repos_card_get_a_page_of_their_own() {
+    let (forge, app, [one, two]) = app_tracking_two_repos().await;
+    let browser = Browser::launch(Viewport::Phone).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+
+    // The list only, keeping each repo's name without its host and its
+    // status icon.
+    tab.sees("Tracked repos").await;
+    tab.sees("a/one").await;
+    tab.sees("a/two").await;
+    for hidden in [
+        one.as_str(),
+        &forge.host(),
+        "Last success",
+        "Size",
+        "Default branch",
+    ] {
+        tab.doesnt_see(hidden).await;
+    }
+    assert_eq!(tab.shown(".repo-table .status svg").await.len(), 2);
+    assert_eq!(
+        tab.shown(".repo-table .status .label").await,
+        Vec::<String>::new(),
+        "the status label is left to screen readers"
+    );
+
+    // A row opens the card only.
+    tab.click_row("a/two").await;
+    tab.arrives_at(&format!("/repos/{}/a/two", forge.host()))
+        .await;
+    tab.sees("All repos").await;
+    tab.sees(&two).await;
+    tab.sees("Default branch").await;
+    tab.doesnt_see("Tracked repos").await;
+    tab.doesnt_see("a/one").await;
+
+    // "All repos" goes back to the list.
+    tab.click_link("All repos").await;
+    tab.arrives_at("/").await;
+    tab.sees("Tracked repos").await;
+    tab.doesnt_see("Default branch").await;
+
+    // So does the back button.
+    tab.click_row("a/one").await;
+    tab.arrives_at(&format!("/repos/{}/a/one", forge.host()))
+        .await;
+    tab.sees(&one).await;
+    tab.go_back().await;
+    tab.sees("Tracked repos").await;
+    tab.doesnt_see(&one).await;
+}
+
+#[tokio::test]
+async fn without_javascript_the_rows_are_links_that_navigate() {
+    let (forge, app, [one, two]) = app_tracking_two_repos().await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser
+        .open_without_javascript(&format!("http://{}/", app.addr()))
+        .await;
+    tab.sees(&one).await;
+
+    tab.click_link("a/two").await;
+
+    tab.arrives_at(&format!("/repos/{}/a/two", forge.host()))
+        .await;
+    tab.sees(&two).await;
+    tab.doesnt_see(&one).await;
 }
 
 #[test]

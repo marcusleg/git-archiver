@@ -43,6 +43,8 @@ pub struct Row {
     /// The `datetime` of the last success cell's `<time>`, if any.
     pub last_success_time: Option<String>,
     pub size: String,
+    /// Where the repo name links to: the repo's page.
+    pub href: String,
     /// Whether the row is marked as the repo the pane shows.
     pub selected: bool,
 }
@@ -113,6 +115,11 @@ impl ListPage {
                     last_success_time: time
                         .and_then(|t| t.value().attr("datetime").map(str::to_owned)),
                     size: text(&cells[3]),
+                    href: select_in(&cells[0], "a[href]")
+                        .first()
+                        .and_then(|a| a.value().attr("href"))
+                        .unwrap_or_else(|| panic!("the repo name is a link: {}", tr.html()))
+                        .to_owned(),
                     selected: tr.value().attr("aria-current") == Some("true"),
                 }
             })
@@ -125,6 +132,11 @@ impl ListPage {
 
     pub fn untracked(&self) -> Vec<Row> {
         self.rows("Untracked archives")
+    }
+
+    /// The page's `<title>`.
+    pub fn title(&self) -> String {
+        text(&select(&self.html, "head title")[0])
     }
 
     /// The card in the detail pane, if the page has a pane.
