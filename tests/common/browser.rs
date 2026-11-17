@@ -675,27 +675,24 @@ impl Tab {
     /// Asserts the tab still shows the document [`Tab::mark_document`]
     /// marked: it neither reloaded nor navigated away since.
     pub async fn still_shows_the_marked_document(&self) {
-        let marked: bool = self
-            .page
-            .evaluate("window.testMark === true")
-            .await
-            .expect("read the mark")
-            .into_value()
-            .expect("the mark is a bool");
-        assert!(marked, "the page was reloaded or replaced");
+        assert!(self.is_marked().await, "the page was reloaded or replaced");
     }
 
     /// Asserts the tab shows a document loaded since [`Tab::mark_document`]
     /// marked the last one: the browser navigated.
     pub async fn shows_a_new_document(&self) {
-        let marked: bool = self
-            .page
+        assert!(!self.is_marked().await, "the page didn't navigate");
+    }
+
+    /// Whether the document shown now is the one [`Tab::mark_document`]
+    /// marked.
+    async fn is_marked(&self) -> bool {
+        self.page
             .evaluate("window.testMark === true")
             .await
             .expect("read the mark")
             .into_value()
-            .expect("the mark is a bool");
-        assert!(!marked, "the page didn't navigate");
+            .expect("the mark is a bool")
     }
 
     /// Clicks the visible `<summary>` reading `label`, with a real mouse
