@@ -758,9 +758,15 @@ fn short_sha(sha: &str) -> Markup {
 }
 
 /// A `<time>` showing how long ago `then` was, with the exact UTC time on
-/// hover.
+/// hover. `data-ago` lets the page's script count it up while the page is
+/// open.
 fn time(then: SystemTime, now: SystemTime) -> Markup {
-    time_element(then, &time_ago(then, now))
+    let exact = humantime::format_rfc3339_seconds(then).to_string();
+    html! {
+        time datetime=(exact) title=(exact_title(&exact)) data-ago {
+            (time_ago(then, now))
+        }
+    }
 }
 
 /// [`time`] for `then`, or "Never" without one.
@@ -775,12 +781,19 @@ fn time_or_never(then: Option<SystemTime>, now: SystemTime) -> Markup {
 fn time_element(at: SystemTime, text: &str) -> Markup {
     let exact = humantime::format_rfc3339_seconds(at).to_string();
     html! {
-        time datetime=(exact) title=(exact.replace('T', " ").replace('Z', " UTC")) {
+        time datetime=(exact) title=(exact_title(&exact)) {
             (text)
         }
     }
 }
 
+/// An RFC 3339 UTC time as people read it: "2026-10-23 14:05:00 UTC".
+fn exact_title(rfc3339: &str) -> String {
+    rfc3339.replace('T', " ").replace('Z', " UTC")
+}
+
+/// How long ago `then` was, in words. The page's script ([`SCRIPT`]) words it
+/// the same way when it counts the time up, so keep the two in step.
 fn time_ago(then: SystemTime, now: SystemTime) -> String {
     let secs = now.duration_since(then).unwrap_or_default().as_secs();
     let (count, unit) = match secs {
@@ -842,11 +855,14 @@ fn layout(content: Markup) -> Markup {
     }
 }
 
-/// Opens the dialog a `data-dialog` button names, and copies a `data-copy`
-/// button's text. The clipboard API needs a secure context, which a
-/// plain-HTTP server on another host isn't, so copying falls back to
-/// selecting the text and copying the selection, as it does when the browser
-/// denies clipboard access.
+/// Opens the dialog a `data-dialog` button names, copies a `data-copy`
+/// button's text, and once a minute rewords every `data-ago` time the way
+/// [`time_ago`] does, by the browser's clock.
+///
+/// The clipboard API needs a secure context, which a plain-HTTP server on
+/// another host isn't, so copying falls back to selecting the text and
+/// copying the selection, as it does when the browser denies clipboard
+/// access.
 const SCRIPT: &str = r#"
 document.addEventListener("click", (event) => {
   const opener = event.target.closest("[data-dialog]");
@@ -870,6 +886,21 @@ document.addEventListener("click", (event) => {
     selectAndCopy();
   }
 });
+
+const timeAgo = (then) => {
+  const secs = Math.floor((Date.now() - then) / 1000);
+  if (secs < 60) return "just now";
+  const [count, unit] =
+    secs < 3600 ? [Math.floor(secs / 60), "minute"]
+    : secs < 86400 ? [Math.floor(secs / 3600), "hour"]
+    : [Math.floor(secs / 86400), "day"];
+  return `${count} ${unit}${count === 1 ? "" : "s"} ago`;
+};
+setInterval(() => {
+  for (const time of document.querySelectorAll("time[data-ago]")) {
+    time.textContent = timeAgo(Date.parse(time.dateTime));
+  }
+}, 60000);
 "#;
 
 /// Lucide `archive`.
