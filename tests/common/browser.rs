@@ -5,12 +5,17 @@
 //! command name) or a Chrome/Chromium found on `PATH`. With none, tests fail
 //! rather than skip, so a run can't pass without exercising the page.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chromiumoxide::browser::{Browser as Chromium, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::emulation::{
+    EventVirtualTimeBudgetExpired, SetVirtualTimePolicyParams, VirtualTimePolicy,
+};
+use chromiumoxide::cdp::browser_protocol::network::TimeSinceEpoch;
 use chromiumoxide::element::Element;
 use chromiumoxide::handler::viewport::Viewport as EmulatedViewport;
 use chromiumoxide::page::Page;
@@ -31,6 +36,10 @@ const CANDIDATES: &[&str] = &[
 
 /// How long a test waits for the page to show what it expects.
 const PATIENCE: Duration = Duration::from_secs(10);
+
+/// How far the clock of a tab opened with [`Browser::open_at`] moves at a
+/// time while its page loads.
+const LOAD_STEP: Duration = Duration::from_millis(10);
 
 /// The screen sizes the page is tested at.
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +142,51 @@ impl Browser {
     /// Opens `url` in a new tab and waits for it to load.
     pub async fn open(&self, url: &str) -> Tab {
         let page = self.browser.new_page(url).await.expect("the page opens");
+        self.loaded(page).await
+    }
+
+    /// Opens `url` in a new tab whose clock reads `now` when the page starts
+    /// loading. The clock moves only as far as loading needs, a fraction of a
+    /// second, then stands still until the test lets time pass with
+    /// [`Tab::let_time_pass`].
+    pub async fn open_at(&self, url: &str, now: SystemTime) -> Tab {
+        let page = self
+            .browser
+            .new_page("about:blank")
+            .await
+            .expect("a blank page opens");
+        let since_epoch = now.duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        page.execute(
+            SetVirtualTimePolicyParams::builder()
+                .policy(VirtualTimePolicy::Pause)
+                .initial_virtual_time(TimeSinceEpoch::new(since_epoch))
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("the page's clock is set");
+        // Navigating only finishes once the clock lets the page load, below.
+        let navigation = tokio::spawn({
+            let page = page.clone();
+            let url = url.to_owned();
+            async move { page.goto(url).await.map(|_| ()) }
+        });
+        let tab = Tab { page };
+        // The page only loads while its clock runs, so run it in small steps
+        // until it has.
+        tab.wait_until("the page to load", || async {
+            tab.let_time_pass_by(VirtualTimePolicy::PauseIfNetworkFetchesPending, LOAD_STEP)
+                .await;
+            let loaded = "location.href !== 'about:blank' && document.readyState === 'complete'";
+            let loaded = tab.page.evaluate(loaded).await.ok()?;
+            loaded.into_value::<bool>().ok()?.then_some(())
+        })
+        .await;
+        navigation.await.unwrap().expect("the page loads");
+        self.loaded(tab.page).await
+    }
+
+    async fn loaded(&self, page: Page) -> Tab {
         page.wait_for_navigation().await.expect("the page loads");
         let width: u32 = page
             .evaluate("window.innerWidth")
@@ -229,6 +283,46 @@ impl Tab {
             }
         }
         None
+    }
+
+    /// The text of every `<time>` on the page, without repeats.
+    pub async fn times(&self) -> BTreeSet<String> {
+        let times: Vec<String> = self
+            .page
+            .evaluate("[...document.querySelectorAll('time')].map((t) => t.innerText.trim())")
+            .await
+            .expect("times")
+            .into_value()
+            .expect("times are strings");
+        times.into_iter().collect()
+    }
+
+    /// Moves the clock of a tab opened with [`Browser::open_at`] forward by
+    /// `by`, running every timer that comes due on the way, and stops it again.
+    pub async fn let_time_pass(&self, by: Duration) {
+        self.let_time_pass_by(VirtualTimePolicy::Advance, by).await;
+    }
+
+    async fn let_time_pass_by(&self, policy: VirtualTimePolicy, by: Duration) {
+        let mut stopped = self
+            .page
+            .event_listener::<EventVirtualTimeBudgetExpired>()
+            .await
+            .expect("listen for the clock to stop");
+        self.page
+            .execute(
+                SetVirtualTimePolicyParams::builder()
+                    .policy(policy)
+                    .budget(by.as_millis() as f64)
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .expect("the page's clock moves");
+        tokio::time::timeout(PATIENCE, stopped.next())
+            .await
+            .unwrap_or_else(|_| panic!("the page's clock didn't move {by:?} in time"))
+            .expect("the browser is still there");
     }
 
     /// Reloads the page.
