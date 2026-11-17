@@ -32,6 +32,9 @@ struct Behaviour {
     served: PathBuf,
     /// Repos that fail instead of being served, by request path prefix.
     failing: Mutex<HashMap<String, Failure>>,
+    /// Repos, by request path prefix, that list their refs but hang when
+    /// asked for objects.
+    hung_transfers: Mutex<Vec<String>>,
     hung_requests: AtomicUsize,
     /// When set, every request must carry this token as its HTTP basic auth
     /// password, the way a git host checks an access token.
@@ -81,6 +84,7 @@ impl FakeForge {
         let behaviour = Arc::new(Behaviour {
             served: dir.path().join("served"),
             failing: Mutex::default(),
+            hung_transfers: Mutex::default(),
             hung_requests: AtomicUsize::new(0),
             required_token: Mutex::default(),
             authorizations: Mutex::default(),
@@ -105,6 +109,17 @@ impl FakeForge {
         self.fail(path, Failure::Hang);
     }
 
+    /// Makes the repo at `path` list its refs as usual, then hang without an
+    /// answer when a fetch asks for objects: far enough into a first clone
+    /// that the archive exists. Until [`Self::restore`].
+    pub fn hang_transfer(&self, path: &str) {
+        self.behaviour
+            .hung_transfers
+            .lock()
+            .unwrap()
+            .push(format!("/{path}.git/"));
+    }
+
     /// Makes every request for the repo at `path` fail this way, until
     /// [`Self::restore`].
     pub fn fail(&self, path: &str, failure: Failure) {
@@ -117,11 +132,13 @@ impl FakeForge {
 
     /// Serves the repo at `path` normally again.
     pub fn restore(&self, path: &str) {
+        let prefix = format!("/{path}.git/");
+        self.behaviour.failing.lock().unwrap().remove(&prefix);
         self.behaviour
-            .failing
+            .hung_transfers
             .lock()
             .unwrap()
-            .remove(&format!("/{path}.git/"));
+            .retain(|hung| *hung != prefix);
     }
 
     /// Stops answering altogether: connections to the forge are refused
@@ -348,6 +365,16 @@ async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request)
             .unwrap();
     }
     let body = to_bytes(body, usize::MAX).await.unwrap();
+    let hung_transfer = behaviour
+        .hung_transfers
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|prefix| parts.uri.path().starts_with(prefix.as_str()));
+    // Asking for objects sends `want` lines; listing refs doesn't.
+    if hung_transfer && body.windows(5).any(|w| w == b"want ") {
+        return fail(&behaviour, Failure::Hang).await;
+    }
 
     let mut command = tokio::process::Command::new("git");
     command

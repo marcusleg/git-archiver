@@ -320,6 +320,31 @@ async fn untracking_a_repo_stops_its_fetch_in_progress() {
 }
 
 #[tokio::test]
+async fn untracking_with_keep_archive_during_a_later_fetch_keeps_the_archive_and_its_row() {
+    let (forge, upstream) = forge_with("foo/bar").await;
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    forge.hang_transfer("foo/bar");
+    upstream.commit("second");
+    app.advance(24 * HOUR);
+    forge.wait_for_hung_request().await;
+
+    let page = untrack(&app, upstream.url(), "Keep archive").await;
+    assert_eq!(page.status, 200, "{}", page.text());
+    // The scheduler fetches one repo at a time, so once another repo's
+    // clone is done, it has finished with the stopped fetch.
+    let other = forge.create_repo("foo/other");
+    other.commit("first");
+    app.add_repo(other.url()).await;
+    app.settle().await;
+
+    assert!(archive.exists());
+    let id = format!("http://{}/foo/bar", forge.host());
+    assert_eq!(untracked(&app).await, [id]);
+}
+
+#[tokio::test]
 async fn untracking_removes_the_repo_from_the_config_and_leaves_the_rest_of_the_file_alone() {
     let x = "https://example.com/foo/x";
     let (a, b) = ("https://example.com/foo/a", "https://example.com/foo/b");

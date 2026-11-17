@@ -11,11 +11,11 @@ A git repository listed in the config, identified by its URL, that the app keeps
 _Avoid_: watched repo, mirror, source
 
 **Archive**:
-The local copy of one repo's default branch and tags, including every preserved ref. An archive outlives tracking: it is only deleted when a person explicitly asks for that in the UI.
+The local copy of one repo's default branch and tags, including every preserved ref. An archive outlives tracking: it is only deleted when a person explicitly asks for that in the UI. The one exception is an archive whose clone was stopped by untracking: it holds nothing yet and is discarded.
 _Avoid_: backup, mirror, clone
 
 **Untrack**:
-To remove a tracked repo from the config. Untracking never deletes the archive by itself; removal through the UI asks separately whether to delete it.
+To remove a tracked repo from the config. Untracking never deletes the archive by itself, except a half-made one from a stopped clone; removal through the UI asks separately whether to delete it.
 _Avoid_: remove, delete (when only untracking is meant)
 
 **Untracked archive**:
