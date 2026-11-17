@@ -317,9 +317,10 @@ impl TestApp {
     /// `path` and clicks the button labelled `choice`, the way a browser
     /// submits it.
     pub async fn untrack_from_page(&self, path: &str, choice: &str) -> Page {
-        use app_page::{select_in, text};
+        use app_page::{PANE_CARD, select_in, text};
         let list = self.page(path).await;
-        let form = list.posting_form(".pane dialog form");
+        list.pane_card().expect("the page has a pane");
+        let form = list.posting_form(&format!("{PANE_CARD} dialog form"));
         let mut fields: Vec<(&str, &str)> = select_in(&form, "input[type=hidden]")
             .iter()
             .map(|input| {
@@ -364,7 +365,7 @@ impl TestApp {
     pub async fn add_repo(&self, url: &str) -> Page {
         let list = self.list_page().await;
         let action = list
-            .posting_form("dialog form:has(input[name=url])")
+            .add_form()
             .value()
             .attr("action")
             .expect("form has an action")
