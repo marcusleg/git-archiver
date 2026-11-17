@@ -3,6 +3,7 @@
 
 mod common;
 
+use common::app_page::PANE_CARD;
 use common::forge::FakeForge;
 use common::git::{commit_of, git, git_async, preserved_refs, refs, try_git};
 use common::{HOUR, TestApp};
@@ -229,7 +230,7 @@ async fn a_card_with_preserved_refs_shows_a_mirror_clone_line_that_brings_them_a
     // The lines of the pane's card matching `selector`.
     let card_lines = async |selector: &str| -> Vec<String> {
         let html = Html::parse_document(&app.get("/").await.text());
-        html.select(&Selector::parse(&format!("main aside article {selector}")).unwrap())
+        html.select(&Selector::parse(&format!("{PANE_CARD} {selector}")).unwrap())
             .map(|code| code.text().collect())
             .collect()
     };

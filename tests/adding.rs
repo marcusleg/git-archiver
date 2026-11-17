@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::app_page::{AppPage, select, select_in, text};
+use common::app_page::{AppPage, PANE_CARD, select, select_in, text};
 use common::forge::{DMCA_MESSAGE, DMCA_NOTICE, Failure, FakeForge};
 use common::{HOUR, Page, TestApp, last_successes, three_repos, urls};
 use scraper::{ElementRef, Html};
@@ -86,10 +86,10 @@ async fn the_add_dialog_is_closed_and_holds_the_form() {
         TestApp::start().await,
         TestApp::tracking(&["https://github.com/foo/bar"]).await,
     ] {
-        let page = app.get("/").await;
-        let parsed = AppPage::parse(&page.text());
-        let html = &parsed.html;
-        let dialog = parsed.add_dialog();
+        let response = app.get("/").await;
+        let page = AppPage::parse(&response.text());
+        let html = &page.html;
+        let dialog = page.add_dialog();
         assert_eq!(dialog.value().attr("open"), None, "closed until asked for");
 
         let heading = &select_in(&dialog, "h2")[0];
@@ -102,7 +102,7 @@ async fn the_add_dialog_is_closed_and_holds_the_form() {
             select_in(&dialog, "p").iter().map(text).collect::<Vec<_>>(),
             ["The app clones it right away, then fetches it once per interval."]
         );
-        let form = parsed.add_form();
+        let form = page.add_form();
         assert!(
             form.ancestors().any(|node| node.id() == dialog.id()),
             "the form is inside the add dialog"
@@ -121,7 +121,7 @@ async fn the_add_dialog_is_closed_and_holds_the_form() {
                 .collect::<Vec<_>>(),
             ["Cancel", "Add repo"]
         );
-        assert_eq!(form_error(&page), None);
+        assert_eq!(form_error(&response), None);
     }
 }
 
@@ -151,7 +151,7 @@ async fn an_added_repo_is_cloned_right_away_and_shows_as_available() {
         [(upstream.url().to_owned(), "Available".to_owned())]
     );
     let html = Html::parse_document(&app.get("/").await.text());
-    let status = select(&html, "main aside article .status.available");
+    let status = select(&html, &format!("{PANE_CARD} .status.available"));
     assert_eq!(
         status.iter().map(text).collect::<Vec<_>>(),
         ["Fetched just now"]
