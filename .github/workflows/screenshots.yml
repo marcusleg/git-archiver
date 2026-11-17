@@ -1,0 +1,45 @@
+name: Screenshots
+
+# Retakes the README's screenshots of the web UI and opens a pull request when
+# they changed. Runs after UI changes land on main, and on demand.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - src/**
+      - assets/**
+      - tests/screenshots.rs
+      - tests/common/**
+      - scripts/update-screenshots.sh
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: screenshots
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  GIT_ARCHIVER_TEST_BROWSER: google-chrome
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/update-screenshots.sh
+      # Does nothing when the screenshots came out the same.
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: update-screenshots
+          delete-branch: true
+          add-paths: docs/screenshots/*.png
+          commit-message: Update the README screenshots
+          title: Update the README screenshots
+          body: |
+            Retaken by the [Screenshots workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) after `${{ github.sha }}`.

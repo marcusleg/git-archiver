@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +19,8 @@ use chromiumoxide::cdp::browser_protocol::emulation::{
 };
 use chromiumoxide::cdp::browser_protocol::network::TimeSinceEpoch;
 use chromiumoxide::cdp::browser_protocol::page::{
-    GetNavigationHistoryParams, NavigateToHistoryEntryParams,
+    CaptureScreenshotFormat, CaptureScreenshotParams, GetNavigationHistoryParams,
+    NavigateToHistoryEntryParams, Viewport as Clip,
 };
 use chromiumoxide::element::Element;
 use chromiumoxide::handler::viewport::Viewport as EmulatedViewport;
@@ -120,13 +122,41 @@ pub struct Browser {
 impl Browser {
     /// Launches a headless browser whose pages have this viewport.
     pub async fn launch(viewport: Viewport) -> Self {
+        Self::launch_with(viewport, viewport.emulation(), &[]).await
+    }
+
+    /// Launches a headless browser for screenshots: its pages have this
+    /// viewport at twice the pixel density, and it reaches every URL, even
+    /// `localhost`, through the HTTP proxy at `proxy`. With the app as the
+    /// proxy, a page of the app opens under any URL, such as
+    /// `http://localhost:8080/`, and the app sees that URL's host in `Host`.
+    pub async fn launch_for_screenshots(viewport: Viewport, proxy: SocketAddr) -> Self {
+        let emulation = EmulatedViewport {
+            device_scale_factor: Some(2.0),
+            ..viewport.emulation()
+        };
+        let proxy = format!("http://{proxy}");
+        let args = [
+            ("proxy-server", proxy.as_str()),
+            // Without this, the browser reaches `localhost` directly.
+            ("proxy-bypass-list", "<-loopback>"),
+        ];
+        Self::launch_with(viewport, emulation, &args).await
+    }
+
+    async fn launch_with(
+        viewport: Viewport,
+        emulation: EmulatedViewport,
+        args: &[(&str, &str)],
+    ) -> Self {
         let binary =
             find_browser().unwrap_or_else(|why| panic!("browser tests need a browser: {why}"));
         let profile = TempDir::new().unwrap();
         let config = BrowserConfig::builder()
             .user_data_dir(profile.path())
             .chrome_executable(binary)
-            .viewport(viewport.emulation())
+            .viewport(emulation)
+            .args(args.iter().copied())
             // CI runners forbid the sandbox's user namespaces.
             .no_sandbox()
             .build()
@@ -631,6 +661,65 @@ impl Tab {
             .expect("scroll position")
             .into_value()
             .expect("the scroll position is a number")
+    }
+
+    /// Runs `script` in the page, for staging a screenshot.
+    pub async fn run(&self, script: &str) {
+        self.page.evaluate(script).await.expect("the script runs");
+    }
+
+    /// Saves the page as a PNG once its fonts have loaded: the whole page,
+    /// from top to bottom, if `whole_page`, else what the viewport shows. In
+    /// a tab opened with [`Browser::open_at`], the clock runs in small steps
+    /// only until the fonts have loaded. (Steps that waited for pending
+    /// requests would wait forever on the page's open `/events` stream.)
+    pub async fn save_screenshot(&self, path: &Path, whole_page: bool) {
+        self.wait_until("the fonts to load", || async {
+            self.run_clock(VirtualTimePolicy::Advance, LOAD_STEP).await;
+            let status = self.page.evaluate("document.fonts.status").await.ok()?;
+            (status.into_value::<String>().ok()? == "loaded").then_some(())
+        })
+        .await;
+        let (width, height): (f64, f64) = self
+            .page
+            .evaluate(match whole_page {
+                true => "[window.innerWidth, document.documentElement.scrollHeight]",
+                false => "[window.innerWidth, window.innerHeight]",
+            })
+            .await
+            .expect("page size")
+            .into_value()
+            .expect("page size is two numbers");
+        let capture = self.page.execute(
+            CaptureScreenshotParams::builder()
+                .format(CaptureScreenshotFormat::Png)
+                .capture_beyond_viewport(true)
+                .clip(Clip {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height,
+                    scale: 1.0,
+                })
+                .build(),
+        );
+        // A page draws nothing while its clock stands still, so run the clock
+        // in small steps until the screenshot is taken. The steps add up to
+        // far less than the minute it takes a relative time to change.
+        tokio::pin!(capture);
+        let screenshot = loop {
+            tokio::select! {
+                taken = &mut capture => break taken.expect("the browser takes a screenshot"),
+                () = self.run_clock(VirtualTimePolicy::Advance, LOAD_STEP) => {}
+            }
+        };
+        let png = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &screenshot.result.data,
+        )
+        .expect("the screenshot is base64");
+        std::fs::write(path, png)
+            .unwrap_or_else(|e| panic!("couldn't write {}: {e}", path.display()));
     }
 
     /// Reloads the page.

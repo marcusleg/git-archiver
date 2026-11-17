@@ -16,6 +16,11 @@ A web UI lists every archive with its status, tip and preserved refs, and gives 
 
 The terms in bold are defined in [`CONTEXT.md`](CONTEXT.md).
 
+<p align="center">
+  <img src="docs/screenshots/desktop.png" alt="The list page on a desktop: tables of tracked repos and untracked archives with their status, last success and size, beside a pane showing one archive's details, preserved refs and clone commands" width="74%">
+  <img src="docs/screenshots/mobile.png" alt="The list page on a phone: the table of tracked repos, with their status, under an Add repo button" width="22%">
+</p>
+
 > [!WARNING]
 > **Git Archiver has no authentication.** The web UI, `/metrics` and the git endpoint are open to anyone who can reach the port. Anyone who can reach it can add repos, untrack them and delete archives.
 >
@@ -200,6 +205,10 @@ Logs go to stdout. Every status change and every rewrite is logged with the repo
 ## Testing
 
 `cargo test` runs the whole suite. It needs `git`, and Chrome or Chromium for the tests that drive the list page in a real headless browser. The browser is the first of `chromium`, `chromium-browser`, `google-chrome`, `google-chrome-stable` and `chrome` found on `PATH`; set `GIT_ARCHIVER_TEST_BROWSER` to a path or command name to pick another. Without one, those tests fail rather than skip.
+
+### Screenshots
+
+The screenshots above come from `scripts/update-screenshots.sh`, which runs the app against fake repos and photographs the list page in the same headless browser as the tests. The [screenshots workflow](.github/workflows/screenshots.yml) runs it after UI changes land on `main`, or on demand, and opens a pull request when the screenshots changed.
 
 ## Releasing
 
