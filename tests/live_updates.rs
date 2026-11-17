@@ -69,6 +69,34 @@ async fn untracking_and_deleting_the_archive_is_announced() {
 }
 
 #[tokio::test]
+async fn deleting_the_archive_of_a_first_fetch_stopped_by_untracking_is_announced() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    forge.hang_transfer("a/one");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance(24 * HOUR);
+    forge.wait_for_hung_request().await;
+    let archive = app.archive(&format!("{}/a/one", forge.host()));
+    assert!(archive.exists(), "the first clone has made the archive");
+
+    let mut events = app.events().await;
+    let page = app
+        .untrack_from_page(&format!("/repos/{}/a/one", forge.host()), "Keep archive")
+        .await;
+    assert_eq!((page.status, page.path.as_str()), (200, "/"));
+    // One event for the untrack, which a page may act on before the
+    // scheduler deletes the half-made archive, and one for the deletion.
+    // They don't merge into one: on the test's single-threaded runtime the
+    // stream sends the first while the deletion waits on a blocking thread.
+    events.changed().await;
+    events.changed().await;
+
+    assert!(!archive.exists(), "a half-made archive isn't kept");
+    assert_eq!(app.list_page().await.untracked(), []);
+}
+
+#[tokio::test]
 async fn a_config_edit_is_announced_once_picked_up() {
     let (forge, upstream, app) = tracking_one().await;
     let second = forge.create_repo("a/two");

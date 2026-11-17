@@ -93,9 +93,15 @@ impl Scheduler {
             () = self.tracking.until_untracked(&repo.id) => {
                 tracing::info!(repo = %repo.id, "stopped fetching: no longer tracked");
                 // A first fetch stopped midway leaves an empty archive,
-                // which isn't worth keeping.
-                if !had_archive && let Err(e) = self.archives.delete(&repo.id).await {
-                    tracing::warn!(repo = %repo.id, error = %format!("{e:#}"), "couldn't delete archive");
+                // which isn't worth keeping. Open pages may already have
+                // listed it as untracked, so its deletion is announced too.
+                if !had_archive {
+                    match self.archives.delete(&repo.id).await {
+                        Ok(()) => self.overview.forget(&repo.id),
+                        Err(e) => {
+                            tracing::warn!(repo = %repo.id, error = %format!("{e:#}"), "couldn't delete archive");
+                        }
+                    }
                 }
                 return;
             }
