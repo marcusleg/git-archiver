@@ -74,7 +74,7 @@
   --radius-md: 0.5rem;
 
   --header-height: 3.5rem;
-  --list-width: 56rem;
+  --page-width: 90rem;
 }
 
 *,
@@ -167,7 +167,7 @@ main {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
-  max-width: var(--list-width);
+  max-width: var(--page-width);
   margin-inline: auto;
   padding: var(--space-6) var(--space-4);
 }
@@ -194,13 +194,111 @@ main {
   color: var(--muted);
 }
 
-.repos {
+/* Two columns: the tables on the left, the selected repo's card in a pane
+   on the right that stays in view while the list scrolls. Banners sit
+   above both. */
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(24rem, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  margin: 0;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.pane {
+  position: sticky;
+  top: var(--space-4);
+  min-width: 0;
+}
+
+/* Below 60rem the pane stacks under the list. */
+@media (max-width: 60rem) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pane {
+    position: static;
+  }
+}
+
+/* Repo tables: one row per repo, in a card */
+
+.card.table-card {
   padding: 0;
-  list-style: none;
+  overflow-x: auto;
+}
+
+.repo-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+}
+
+.repo-table th {
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.repo-table td {
+  padding: var(--space-2) var(--space-3);
+  vertical-align: top;
+  border-top: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.repo-table tbody tr:first-child td {
+  border-top: 0;
+}
+
+.repo-table .num {
+  text-align: right;
+}
+
+.repo-table td.repo {
+  min-width: 14rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.repo-table .host {
+  color: var(--muted);
+}
+
+.repo-table .status {
+  display: inline-flex;
+  margin: 0;
+}
+
+.repo-table tr[aria-current="true"] td {
+  background: var(--surface-hover);
+}
+
+/* A stripe at the selected row's left edge, drawn inside the cell. */
+.repo-table tr[aria-current="true"] td:first-child {
+  position: relative;
+}
+
+.repo-table tr[aria-current="true"] td:first-child::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--primary);
 }
 
 /* Cards: lifted off the page by `surface` and a 1px border, never a shadow */

@@ -48,6 +48,8 @@ struct Behaviour {
 pub enum Failure {
     /// 403 with GitHub's DMCA `remote:` message.
     DmcaTakedown,
+    /// 451, as a forge answers for a repo blocked for legal reasons.
+    UnavailableForLegalReasons,
     /// 404 "Repository not found", as GitHub answers for a deleted repo.
     NotFound,
     /// 401 asking for credentials, as GitHub answers anonymous requests for
@@ -387,6 +389,10 @@ async fn fail(behaviour: &Behaviour, failure: Failure) -> Response {
         Failure::DmcaTakedown => (
             StatusCode::FORBIDDEN,
             format!("{DMCA_MESSAGE}\nSee the takedown notice for more details:\n  {DMCA_NOTICE}\n"),
+        ),
+        Failure::UnavailableForLegalReasons => (
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+            "Repository unavailable for legal reasons.\n".to_owned(),
         ),
         Failure::NotFound => (StatusCode::NOT_FOUND, "Repository not found.\n".to_owned()),
         Failure::Unauthorized => (StatusCode::UNAUTHORIZED, String::new()),

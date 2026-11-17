@@ -137,14 +137,15 @@ async fn hand_edit_error(config: &str) -> HandEditError {
     let page = app.get("/").await.text();
     let html = Html::parse_document(&page);
     let reason = html
-        .select(&Selector::parse("main .banner pre.reason").unwrap())
+        .select(&Selector::parse("main > .banner pre.reason").unwrap())
         .next()
         .unwrap_or_else(|| panic!("{config:?}: no config warning: {page}"))
         .text()
         .collect();
-    let repos: Vec<String> = html
-        .select(&Selector::parse("main article .repo-url").unwrap())
-        .map(|repo| repo.text().collect::<String>().trim().to_owned())
+    let repos: Vec<String> = common::list_page::ListPage::parse(&page)
+        .tracked()
+        .into_iter()
+        .map(|row| row.title)
         .collect();
     assert_eq!(repos, [GOOD_REPO], "{config:?}: keeps the last good config");
     HandEditError {

@@ -2,28 +2,16 @@ mod common;
 
 use common::forge::{Failure, FakeForge};
 use common::git::refs;
-use common::{HOUR, TestApp};
+use common::list_page::{ListPage, select, text};
+use common::{HOUR, MINUTE, TestApp};
 use scraper::{Html, Selector};
 
-fn select<'a>(html: &'a Html, selector: &str) -> Vec<scraper::ElementRef<'a>> {
-    html.select(&Selector::parse(selector).unwrap()).collect()
-}
-
-fn text(element: &scraper::ElementRef) -> String {
-    element
-        .text()
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[tokio::test]
-async fn the_list_page_shows_one_card_per_tracked_repo() {
+async fn the_list_page_shows_one_row_per_tracked_repo_and_the_first_ones_card() {
     let app = TestApp::with_config(
         r#"repos = [
-  "https://github.com/foo/bar",
   "https://gitlab.com/group/sub/project.git",
+  "https://github.com/foo/bar",
 ]"#,
     )
     .await;
@@ -36,32 +24,152 @@ async fn the_list_page_shows_one_card_per_tracked_repo() {
         page.content_type
     );
 
-    let html = Html::parse_document(&page.text());
-    let cards = select(&html, "main article");
-    assert_eq!(cards.len(), 2);
-    assert!(text(&cards[0]).contains("https://github.com/foo/bar"));
-    assert!(text(&cards[1]).contains("https://gitlab.com/group/sub/project.git"));
+    let list = ListPage::parse(&page.text());
+    assert_eq!(
+        list.columns("Tracked repos"),
+        ["Repo", "Status", "Last success", "Size"]
+    );
+    let rows = list.tracked();
+    let repos: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.host.as_str(),
+                r.path.as_str(),
+                r.repo.as_str(),
+                r.title.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        repos,
+        [
+            (
+                "github.com/",
+                "foo/bar",
+                "github.com/foo/bar",
+                "https://github.com/foo/bar"
+            ),
+            (
+                "gitlab.com/",
+                "group/sub/project",
+                "gitlab.com/group/sub/project",
+                "https://gitlab.com/group/sub/project.git"
+            ),
+        ]
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.selected).collect::<Vec<_>>(),
+        [true, false],
+        "the pane's repo is marked"
+    );
+    assert_eq!(
+        list.pane_title().as_deref(),
+        Some("https://github.com/foo/bar")
+    );
+    assert_eq!(select(&list.html, "main article").len(), 1, "one card");
     assert!(
-        select(&html, "title")
+        select(&list.html, "title")
             .iter()
             .any(|t| text(t) == "Git Archiver")
     );
     assert!(
-        select(&html, "header")
+        select(&list.html, "header")
             .iter()
             .any(|h| text(h).contains("Git Archiver"))
     );
 }
 
 #[tokio::test]
-async fn the_list_page_shows_an_empty_state_when_no_repos_are_tracked() {
+async fn each_status_shows_its_icon_and_label_with_the_last_success_and_size() {
+    let forge = FakeForge::start().await;
+    let [ok, legal, broken] = ["a/ok", "a/legal", "a/broken"].map(|path| {
+        let upstream = forge.create_repo(path);
+        upstream.commit("first");
+        upstream
+    });
+    forge.fail("a/legal", Failure::UnavailableForLegalReasons);
+    forge.fail("a/broken", Failure::ServerError);
+    let never = "https://github.com/z/never";
+    // Four repos in a 24h interval are fetched 6h apart, in config order.
+    let app = TestApp::tracking(&[ok.url(), legal.url(), broken.url(), never]).await;
+    app.advance_and_settle(6 * HOUR).await;
+    app.advance_and_settle(6 * HOUR).await;
+    app.advance_and_settle(6 * HOUR).await;
+
+    let rows = app.list_page().await.tracked();
+    let cells: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.path.as_str(),
+                r.status.as_str(),
+                r.icon.as_str(),
+                r.last_success.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            (
+                "a/broken",
+                "Fetch failed",
+                "icon icon-refresh-cw-off",
+                "Never"
+            ),
+            ("a/legal", "Unavailable · 451", "icon icon-ban", "Never"),
+            (
+                "a/ok",
+                "Available",
+                "icon icon-circle-check",
+                "12 hours ago"
+            ),
+            ("z/never", "Not fetched yet", "icon icon-clock", "Never"),
+        ]
+    );
+    assert_eq!(
+        rows[2].last_success_time.as_deref(),
+        Some("2026-11-16T18:00:00Z")
+    );
+    assert_eq!(rows[0].last_success_time, None);
+
+    let (number, unit) = rows[2].size.split_once(' ').unwrap();
+    assert!(number.parse::<f64>().unwrap() > 0.0, "{}", rows[2].size);
+    assert!(["B", "kB", "MB", "GB"].contains(&unit), "{}", rows[2].size);
+    assert_eq!(rows[3].size, "—");
+}
+
+#[tokio::test]
+async fn the_list_page_shows_an_empty_state_and_no_pane_when_no_repos_are_tracked() {
     let app = TestApp::start().await;
 
-    let html = Html::parse_document(&app.get("/").await.text());
-    assert!(select(&html, "main article").is_empty());
-    let main = text(&select(&html, "main")[0]);
+    let list = app.list_page().await;
+    assert!(select(&list.html, "main aside").is_empty());
+    assert!(select(&list.html, "main article").is_empty());
+    assert!(list.tracked().is_empty());
+    let main = text(&select(&list.html, "main")[0]);
     assert!(main.contains("No repos tracked yet"), "{main}");
     assert!(main.contains("config.toml"), "{main}");
+}
+
+#[tokio::test]
+async fn untracked_archives_show_in_their_table_when_no_repos_are_tracked() {
+    let app = TestApp::start().await;
+    std::fs::create_dir_all(app.archive("example.com/foo/bar")).unwrap();
+
+    let list = app.list_page().await;
+    assert!(select(&list.html, "main aside").is_empty(), "no pane");
+    assert!(text(&select(&list.html, "main")[0]).contains("No repos tracked yet"));
+    assert_eq!(
+        list.columns("Untracked archives"),
+        ["Repo", "Status", "Last success", "Size"]
+    );
+    let rows = list.untracked();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].repo, "example.com/foo/bar");
+    assert_eq!(rows[0].title, "https://example.com/foo/bar");
+    assert!(!rows[0].selected);
 }
 
 #[tokio::test]
@@ -75,18 +183,49 @@ async fn a_repo_added_to_the_config_shows_after_a_restart() {
 
     app.restart().await;
 
-    let html = Html::parse_document(&app.get("/").await.text());
-    let cards = select(&html, "main article");
-    assert_eq!(cards.len(), 1);
-    assert!(text(&cards[0]).contains("https://github.com/foo/bar"));
+    let list = app.list_page().await;
+    let titles: Vec<_> = list.tracked().into_iter().map(|r| r.title).collect();
+    assert_eq!(titles, ["https://github.com/foo/bar"]);
+    assert_eq!(
+        list.pane_title().as_deref(),
+        Some("https://github.com/foo/bar")
+    );
 }
 
 #[tokio::test]
-async fn repo_urls_are_escaped_in_the_page() {
-    let app = TestApp::with_config(r#"repos = ["https://example.com/a/<b>"]"#).await;
+async fn repo_urls_are_escaped_in_the_row_its_title_and_the_card() {
+    let url = "https://example.com/a/<b>";
+    let app = TestApp::with_config(&format!("repos = [{url:?}]")).await;
 
     let body = app.get("/").await.text();
     assert!(!body.contains("<b>"), "{body}");
+    let list = ListPage::parse(&body);
+    let row = &list.tracked()[0];
+    assert_eq!(row.repo, "example.com/a/%3Cb%3E", "the identity encodes it");
+    assert_eq!(row.title, url);
+    assert_eq!(list.pane_title().as_deref(), Some(url));
+}
+
+#[tokio::test]
+async fn banners_span_the_page_above_both_columns() {
+    let app = TestApp::tracking(&["https://github.com/foo/bar"]).await;
+    app.write_config("repos = [\n");
+    app.advance_and_settle(MINUTE).await;
+
+    let list = app.list_page().await;
+    let banner = select(&list.html, "main > .banner");
+    assert_eq!(
+        banner.len(),
+        1,
+        "the config error banner is a child of main"
+    );
+    assert!(text(&banner[0]).contains("config.toml"));
+    assert!(select(&list.html, "main section .banner, main aside .banner").is_empty());
+    assert_eq!(
+        select(&list.html, "main > .banner + .columns").len(),
+        1,
+        "the columns follow the banner"
+    );
 }
 
 /// The first element under `element` matching `selector`.
@@ -361,17 +500,14 @@ async fn a_repo_not_fetched_yet_shows_no_last_success_field() {
     assert_no_field(card, "Last success");
 }
 
-/// The repo names on the cards of the section headed `heading`, in page
-/// order.
-fn section_repos(html: &Html, heading: &str) -> Vec<String> {
-    let article = Selector::parse("article .repo-url").unwrap();
-    for section in select(html, "main section") {
-        let h2 = section.select(&Selector::parse("h2").unwrap()).next();
-        if h2.is_some_and(|h2| text(&h2).starts_with(heading)) {
-            return section.select(&article).map(|r| text(&r)).collect();
-        }
-    }
-    Vec::new()
+/// The hover titles of the rows in the table of the section headed
+/// `heading`, in page order.
+fn section_repos(html: &str, heading: &str) -> Vec<String> {
+    ListPage::parse(html)
+        .rows(heading)
+        .into_iter()
+        .map(|r| r.title)
+        .collect()
 }
 
 #[tokio::test]
@@ -383,7 +519,7 @@ async fn tracked_repos_show_sorted_by_identity_whatever_the_config_order() {
     ];
     let app = TestApp::tracking(&urls).await;
 
-    let html = Html::parse_document(&app.get("/").await.text());
+    let html = app.get("/").await.text();
     assert_eq!(
         section_repos(&html, "Tracked repos"),
         [urls[2], urls[1], urls[0]]
@@ -401,7 +537,7 @@ async fn identities_sort_case_insensitively_and_the_exact_string_breaks_ties() {
     ];
     let app = TestApp::tracking(&urls).await;
 
-    let html = Html::parse_document(&app.get("/").await.text());
+    let html = app.get("/").await.text();
     assert_eq!(
         section_repos(&html, "Tracked repos"),
         [urls[4], urls[2], urls[1], urls[3], urls[0]]
@@ -418,7 +554,7 @@ async fn the_scheme_plays_no_part_in_the_order() {
     ];
     let app = TestApp::tracking(&urls).await;
 
-    let html = Html::parse_document(&app.get("/").await.text());
+    let html = app.get("/").await.text();
     assert_eq!(
         section_repos(&html, "Tracked repos"),
         [urls[2], urls[1], urls[0], urls[3]]
@@ -436,7 +572,7 @@ async fn untracked_archives_show_sorted_the_same_way() {
         std::fs::create_dir_all(app.archive(archive)).unwrap();
     }
 
-    let html = Html::parse_document(&app.get("/").await.text());
+    let html = app.get("/").await.text();
     assert_eq!(
         section_repos(&html, "Untracked archives"),
         [
