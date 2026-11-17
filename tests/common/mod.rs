@@ -255,8 +255,18 @@ impl TestApp {
     }
 
     pub async fn get(&self, path: &str) -> Page {
+        self.get_with_headers(path, &[]).await
+    }
+
+    /// Like [`TestApp::get`], but also sends these request headers, the way a
+    /// reverse proxy in front of the app would.
+    pub async fn get_with_headers(&self, path: &str, headers: &[(&str, &str)]) -> Page {
         let url = format!("http://{}{}", self.addr(), path);
-        Page::from(reqwest::get(&url).await.expect("request succeeds")).await
+        let mut request = reqwest::Client::new().get(&url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        Page::from(request.send().await.expect("request succeeds")).await
     }
 
     /// Submits a form the way a browser does, following the redirect after a

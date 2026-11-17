@@ -272,3 +272,118 @@ async fn a_card_with_preserved_refs_shows_a_mirror_clone_line_that_brings_them_a
     git_async(out.path(), &args).await;
     assert_eq!(preserved_refs(&out.path().join("bar.git")), preserved);
 }
+
+/// An app with one archived repo that has a preserved ref, so its card shows
+/// both a plain and a mirror clone line.
+async fn app_with_a_preserved_ref() -> (FakeForge, TestApp) {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/bar");
+    let first = upstream.commit("first");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    let archive = app.archive(&format!("{}/foo/bar", forge.host()));
+    git(
+        &archive,
+        &[
+            "update-ref",
+            "refs/preserved/20261116T120000Z/heads/main",
+            &first,
+        ],
+    );
+    (forge, app)
+}
+
+/// Asserts that, for a request carrying these headers, the list page's plain
+/// and mirror clone lines both use `scheme`.
+async fn assert_clone_scheme(headers: &[(&str, &str)], scheme: &str) {
+    let (forge, app) = app_with_a_preserved_ref().await;
+    assert_clone_scheme_on(&app, &forge, headers, scheme).await;
+}
+
+async fn assert_clone_scheme_on(
+    app: &TestApp,
+    forge: &FakeForge,
+    headers: &[(&str, &str)],
+    scheme: &str,
+) {
+    let html = Html::parse_document(&app.get_with_headers("/", headers).await.text());
+    let line = |selector: &str| -> String {
+        html.select(&Selector::parse(selector).unwrap())
+            .next()
+            .unwrap_or_else(|| panic!("no {selector} on the list page"))
+            .text()
+            .collect()
+    };
+    let http_url = endpoint(app, forge, "foo/bar");
+    let url = format!("{scheme}{}", http_url.strip_prefix("http").unwrap());
+    assert_eq!(
+        line("code.clone"),
+        format!("git clone {url}"),
+        "behind {headers:?}"
+    );
+    assert_eq!(
+        line("code.mirror-clone"),
+        format!("git clone --mirror {url}"),
+        "behind {headers:?}"
+    );
+}
+
+/// Asserts `scheme` for each set of headers, all against one app.
+async fn assert_clone_schemes(cases: &[(&[(&str, &str)], &str)]) {
+    let (forge, app) = app_with_a_preserved_ref().await;
+    for (headers, scheme) in cases {
+        assert_clone_scheme_on(&app, &forge, headers, scheme).await;
+    }
+}
+
+#[tokio::test]
+async fn clone_lines_use_https_behind_a_proxy_that_sets_x_forwarded_proto() {
+    assert_clone_scheme(&[("X-Forwarded-Proto", "https")], "https").await;
+}
+
+#[tokio::test]
+async fn clone_lines_use_https_behind_a_proxy_that_sets_forwarded_proto() {
+    assert_clone_schemes(&[
+        (&[("Forwarded", "proto=https")], "https"),
+        (&[("Forwarded", "for=1.2.3.4;proto=\"HTTPS\"")], "https"),
+        (&[("Forwarded", "for=1.2.3.4 ; Proto = https")], "https"),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn clone_lines_use_the_scheme_of_the_hop_nearest_the_client() {
+    assert_clone_schemes(&[
+        (&[("X-Forwarded-Proto", "https, http")], "https"),
+        (&[("Forwarded", "proto=https, proto=http")], "https"),
+        (&[("Forwarded", "for=1.2.3.4, proto=https")], "http"),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn forwarded_wins_over_x_forwarded_proto() {
+    assert_clone_schemes(&[
+        (
+            &[("Forwarded", "proto=http"), ("X-Forwarded-Proto", "https")],
+            "http",
+        ),
+        (
+            &[("Forwarded", "for=1.2.3.4"), ("X-Forwarded-Proto", "https")],
+            "https",
+        ),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn clone_lines_stay_on_http_without_a_usable_forwarded_scheme() {
+    assert_clone_schemes(&[
+        (&[], "http"),
+        (&[("X-Forwarded-Proto", "ftp")], "http"),
+        (&[("X-Forwarded-Proto", "")], "http"),
+        (&[("Forwarded", "proto=")], "http"),
+        (&[("Forwarded", "proto=ftp")], "http"),
+    ])
+    .await;
+}

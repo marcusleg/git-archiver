@@ -36,7 +36,8 @@ const MAX_REQUEST_BODY: usize = 64 * 1024 * 1024;
 const SERVICES: &[&str] = &["git-upload-pack", "git-receive-pack"];
 
 /// The command that clones a repo's archive from the endpoint, for a server
-/// reached at `base` (`http://<host>[:<port>]`).
+/// reached at `base` (`<scheme>://<host>[:<port>]`, the scheme being `http`
+/// or `https`).
 pub fn clone_command(base: &str, id: &RepoId) -> String {
     format!("git clone {}", endpoint_url(base, id))
 }
