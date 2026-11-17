@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
+use tokio::sync::watch;
+
 use crate::archive::FetchError;
 use crate::identity::RepoId;
 use crate::state::{RepoState, State, Status};
@@ -11,13 +13,31 @@ use crate::state::{RepoState, State, Status};
 pub type SharedOverview = Arc<Overview>;
 
 /// What the app remembers about its archives, shared between the scheduler,
-/// the web UI and `/metrics`. It owns its lock, and saves the state itself
-/// whenever it changes.
+/// the web UI and `/metrics`. It owns its lock, saves the state itself
+/// whenever it changes, and tells whoever watches when something the list
+/// page shows changed.
 #[derive(Debug)]
 pub struct Overview {
     inner: Mutex<Inner>,
     save_lock: Mutex<()>,
     state_path: PathBuf,
+    /// Sent to after each change the list page shows.
+    changes: watch::Sender<()>,
+}
+
+/// Notices of changes to what the list page shows, from [`Overview::changes`].
+pub struct Changes(watch::Receiver<()>);
+
+impl Changes {
+    /// Resolves at the next change, or at once if one came since the last
+    /// call. Changes in a burst may resolve it only once.
+    pub async fn changed(&mut self) {
+        // The sender lives in the Overview, which outlives every watcher that
+        // holds it; if it's gone, nothing will change any more.
+        if self.0.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -54,7 +74,7 @@ impl FetchErrors {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tracked {
     /// As written in the config.
     pub url: String,
@@ -98,7 +118,19 @@ impl Overview {
             }),
             save_lock: Mutex::new(()),
             state_path,
+            changes: watch::Sender::new(()),
         })
+    }
+
+    /// Watches for changes to what the list page shows: a fetch result, the
+    /// tracked list, the config error, or an untracked archive deleted.
+    /// Only changes after this call count.
+    pub fn changes(&self) -> Changes {
+        Changes(self.changes.subscribe())
+    }
+
+    fn announce(&self) {
+        self.changes.send_replace(());
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -148,24 +180,36 @@ impl Overview {
     /// Takes the config's repo list after a repo was untracked or found
     /// missing from it. Repos no longer tracked leave the queue.
     pub fn set_tracked(&self, repos: &[String]) {
-        self.inner().set_tracked(repos);
+        let changed = self.inner().set_tracked(repos);
+        if changed {
+            self.announce();
+        }
     }
 
     /// Takes the config's repo list after `id` was added, and queues it to
     /// be fetched before any scheduled fetch, due `now`.
     pub fn track_first(&self, repos: &[String], id: &RepoId, now: SystemTime) {
-        let mut inner = self.inner();
-        inner.set_tracked(repos);
-        inner.fetch_first.push(id.clone());
-        inner.next_fetch = Some(now);
+        {
+            let mut inner = self.inner();
+            inner.set_tracked(repos);
+            inner.fetch_first.push(id.clone());
+            inner.next_fetch = Some(now);
+        }
+        self.announce();
     }
 
     /// Records the config error, or that there is none. Returns whether that
     /// changed what was recorded.
     pub fn set_config_error(&self, error: Option<String>) -> bool {
-        let mut inner = self.inner();
-        let changed = inner.config_error != error;
-        inner.config_error = error;
+        let changed = {
+            let mut inner = self.inner();
+            let changed = inner.config_error != error;
+            inner.config_error = error;
+            changed
+        };
+        if changed {
+            self.announce();
+        }
         changed
     }
 
@@ -203,7 +247,8 @@ impl Overview {
     }
 
     /// Forgets the state of every identity that shares the archive of `id`,
-    /// and saves.
+    /// and saves. Called once the archive is deleted, so that counts as a
+    /// change even with no state to forget.
     pub fn forget(&self, id: &RepoId) {
         self.change(|inner| {
             inner
@@ -213,9 +258,9 @@ impl Overview {
         });
     }
 
-    /// Applies `change` and saves the resulting state. The save lock is held
-    /// from taking a copy of the state until it's written, so an older copy
-    /// never overwrites a newer one.
+    /// Applies `change`, saves the resulting state and announces the change.
+    /// The save lock is held from taking a copy of the state until it's
+    /// written, so an older copy never overwrites a newer one.
     fn change(&self, change: impl FnOnce(&mut Inner)) {
         let _save = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
         let state = {
@@ -226,6 +271,7 @@ impl Overview {
         if let Err(e) = state.save(&self.state_path) {
             tracing::error!(error = %format!("{e:#}"), "couldn't save state");
         }
+        self.announce();
     }
 }
 
@@ -234,14 +280,18 @@ impl Inner {
         self.state.repos.get(id.as_str())
     }
 
-    fn set_tracked(&mut self, repos: &[String]) {
-        self.tracked = tracked(repos);
+    /// Returns whether the tracked list changed.
+    fn set_tracked(&mut self, repos: &[String]) -> bool {
+        let tracked = tracked(repos);
+        let changed = self.tracked != tracked;
+        self.tracked = tracked;
         let Self {
             tracked,
             fetch_first,
             ..
         } = self;
         fetch_first.retain(|id| tracked.iter().any(|t| t.id == *id));
+        changed
     }
 
     /// The repo to fetch before any scheduled fetch: the first queued repo

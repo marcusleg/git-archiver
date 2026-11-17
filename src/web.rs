@@ -2,17 +2,22 @@
 //! the binary so the page loads nothing from other hosts.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Form, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
+use futures_util::{StreamExt, stream};
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 use serde::Deserialize;
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 
 use crate::archive::{Archives, Inspection};
 use crate::clock::Clock;
@@ -29,6 +34,9 @@ pub struct AppState {
     pub archives: Arc<Archives>,
     pub overview: SharedOverview,
     pub tracking: Arc<Tracking>,
+    /// Cancelled when the app shuts down, to end the event streams that
+    /// would otherwise keep it waiting.
+    pub closing: CancellationToken,
 }
 
 const STYLESHEET: &str = include_str!("../assets/style.css");
@@ -56,6 +64,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/repos", post(add_repo))
         .route("/repos/untrack", post(untrack_repo))
         .route("/repos/{*host_and_path}", get(repo_page))
+        .route("/events", get(events))
         .route("/metrics", get(metrics))
         .route("/git/{*path}", any(git))
         .route("/assets/style.css", get(stylesheet))
@@ -81,6 +90,46 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     }
     let body = metrics::render(&view, &preserved_refs);
     ([(header::CONTENT_TYPE, metrics::CONTENT_TYPE)], body).into_response()
+}
+
+/// How often the event stream sends a comment when there's no event, so
+/// proxies and browsers don't take a quiet stream for a dead one.
+const HEARTBEAT: Duration = Duration::from_secs(30);
+
+/// The event after a change. Browsers drop an event without a `data` field,
+/// so it has one, empty.
+const CHANGED: &str = "event: changed\ndata:\n\n";
+
+const X_ACCEL_BUFFERING: header::HeaderName = header::HeaderName::from_static("x-accel-buffering");
+
+/// Server-Sent Events: a `changed` event after each change to what the list
+/// page shows, and a comment every [`HEARTBEAT`]. No repo data goes over the
+/// stream; the page fetches what changed itself. `X-Accel-Buffering: no`
+/// asks nginx to pass events on as they come rather than buffer them. The
+/// stream ends when the app shuts down.
+async fn events(State(app): State<Arc<AppState>>) -> Response {
+    let changed = stream::unfold(app.overview.changes(), |mut changes| async move {
+        changes.changed().await;
+        Some((CHANGED, changes))
+    });
+    let mut every = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT, HEARTBEAT);
+    every.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let heartbeat = stream::unfold(every, |mut every| async move {
+        every.tick().await;
+        Some((":\n\n", every))
+    });
+    let body = stream::select(changed, heartbeat)
+        .map(Ok::<_, Infallible>)
+        .take_until(app.closing.clone().cancelled_owned());
+    (
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (X_ACCEL_BUFFERING, "no"),
+        ],
+        Body::from_stream(body),
+    )
+        .into_response()
 }
 
 async fn git(State(state): State<Arc<AppState>>, request: Request) -> Response {
@@ -271,6 +320,7 @@ async fn repo_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
 fn not_found() -> Response {
     let page = layout(
         "Repo not found · Git Archiver",
+        None,
         html! {
             section .card.empty {
                 (icon_archive())
@@ -344,6 +394,16 @@ impl Page<'_> {
         }
     }
 
+    /// Where the page lives, which the page fetches again to update itself.
+    /// After a failed action the browser shows a page at the action's
+    /// address, which only takes a POST, so this isn't always the URL shown.
+    fn path(self) -> String {
+        match self {
+            Page::List => "/".to_owned(),
+            Page::Repo(id) => repo_page_path(id),
+        }
+    }
+
     /// The class that tells the narrow layout to show the list only, or
     /// the card only.
     fn class(self) -> &'static str {
@@ -382,6 +442,7 @@ async fn render_page(
     Some(Html(
         layout(
             &page.title(),
+            Some(&page.path()),
             html! {
                 @if let Some(problem) = problem {
                     div .card.banner role="alert" {
@@ -948,8 +1009,9 @@ fn format_size(bytes: u64) -> String {
     format!("{value:.1} {unit}")
 }
 
-/// A page of the app titled `title`, around `content`.
-fn layout(title: &str, content: Markup) -> Markup {
+/// A page of the app titled `title`, around `content`. With a `live` path,
+/// the page's script keeps `content` up to date from that path.
+fn layout(title: &str, live: Option<&str>, content: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -966,7 +1028,7 @@ fn layout(title: &str, content: Markup) -> Markup {
                 header .app-header {
                     a .brand href="/" { "Git Archiver" }
                 }
-                main { (content) }
+                main data-live=[live] { (content) }
                 script { (PreEscaped(SCRIPT)) }
             }
         }
@@ -975,8 +1037,9 @@ fn layout(title: &str, content: Markup) -> Markup {
 
 /// Opens the dialog a `commandfor` button names where the browser lacks
 /// invoker commands, shows a dialog the page opened on load as a modal,
-/// copies a `data-copy` button's text, and once a minute rewords every
-/// `data-ago` time the way [`time_ago`] does, by the browser's clock.
+/// copies a `data-copy` button's text, once a minute rewords every
+/// `data-ago` time the way [`time_ago`] does, by the browser's clock, and
+/// keeps a page marked `data-live` up to date (see [`events`]).
 ///
 /// The clipboard API needs a secure context, which a plain-HTTP server on
 /// another host isn't, so copying falls back to selecting the text and
@@ -1027,6 +1090,87 @@ setInterval(() => {
     time.textContent = timeAgo(Date.parse(time.dateTime));
   }
 }, 60000);
+
+// On each `changed` event, fetch the page's `data-live` path again and swap
+// in its content. Events that come while fetching fold into one more fetch.
+// While a dialog is open the swap waits, and happens once it closes. The
+// swap keeps the scroll position, the focus, open `<details>` and the
+// banner of a failed action. A repo page whose repo is gone becomes the
+// list.
+const main = document.querySelector("main[data-live]");
+if (main && "EventSource" in window) {
+  let stale = false;
+  let busy = false;
+  const dialogOpen = () => document.querySelector("dialog[open]") !== null;
+  const update = async () => {
+    if (busy || !stale || dialogOpen()) return;
+    busy = true;
+    stale = false;
+    try {
+      await swap();
+    } catch {
+      // The app can't be reached; the next event tries again.
+    } finally {
+      busy = false;
+    }
+    update();
+  };
+  const swap = async () => {
+    let path = main.dataset.live;
+    let response = await fetch(path);
+    if (response.status === 404 && path !== "/") {
+      path = "/";
+      response = await fetch(path);
+    }
+    if (!response.ok) return;
+    const page = new DOMParser().parseFromString(await response.text(), "text/html");
+    const fresh = page.querySelector("main[data-live]");
+    if (!fresh) return;
+    if (dialogOpen()) {
+      stale = true;
+      return;
+    }
+    if (path !== main.dataset.live) history.replaceState(null, "", path);
+    const [x, y] = [scrollX, scrollY];
+    const banner = main.querySelector(":scope > [role=alert]");
+    if (banner) fresh.prepend(banner.cloneNode(true));
+    const card = (element) => element.closest("article")?.querySelector(".repo-url")?.textContent;
+    const opened = [...main.querySelectorAll("details[open]")].map(card);
+    for (const details of fresh.querySelectorAll("details")) {
+      if (opened.includes(card(details))) details.open = true;
+    }
+    const focused = main.contains(document.activeElement) ? describe(document.activeElement) : null;
+    main.replaceChildren(...fresh.childNodes);
+    main.dataset.live = fresh.dataset.live;
+    document.title = page.title;
+    scrollTo(x, y);
+    if (focused) {
+      const again = [...main.querySelectorAll(focused.tag)].find((e) => describe(e).key === focused.key);
+      again?.focus({ preventScroll: true });
+    }
+  };
+  // What tells a focused element apart from others of its kind.
+  const describe = (element) => ({
+    tag: element.tagName,
+    key: element.getAttribute("href") ?? element.getAttribute("aria-label") ?? element.textContent.trim(),
+  });
+  const events = new EventSource("/events");
+  events.addEventListener("changed", () => {
+    stale = true;
+    update();
+  });
+  // Changes may have gone unannounced while the stream was down.
+  let lost = false;
+  events.addEventListener("error", () => { lost = true; });
+  events.addEventListener("open", () => {
+    if (!lost) return;
+    lost = false;
+    stale = true;
+    update();
+  });
+  // `close` doesn't bubble, so listen as it comes down from the document.
+  document.addEventListener("close", update, true);
+}
 "#;
 
 /// Lucide `plus`.

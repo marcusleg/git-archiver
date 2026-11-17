@@ -290,6 +290,149 @@ async fn without_javascript_the_rows_are_links_that_navigate() {
     tab.doesnt_see(&one).await;
 }
 
+/// The page while open: a fetch shows in the row and the card without a
+/// reload.
+async fn a_fetch_updates_the_open_page(viewport: Viewport) {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    let browser = Browser::launch(viewport).await;
+    let tab = browser
+        .open(&format!(
+            "http://{}/repos/{}/a/one",
+            app.addr(),
+            forge.host()
+        ))
+        .await;
+    tab.sees("Not fetched yet").await;
+    tab.mark_document().await;
+
+    app.advance_and_settle(24 * HOUR).await;
+
+    tab.sees("Fetched just now").await;
+    tab.stops_seeing("Not fetched yet").await;
+    tab.still_shows_the_marked_document().await;
+}
+
+#[tokio::test]
+async fn a_fetch_updates_the_open_page_on_desktop() {
+    a_fetch_updates_the_open_page(Viewport::Desktop).await;
+}
+
+#[tokio::test]
+async fn a_fetch_updates_the_open_page_on_a_phone() {
+    a_fetch_updates_the_open_page(Viewport::Phone).await;
+}
+
+#[tokio::test]
+async fn a_fetch_updates_the_row_on_the_list_page() {
+    let (forge, app, _urls) = app_tracking_two_repos().await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.mark_document().await;
+    tab.doesnt_see("Unavailable").await;
+
+    forge.fail("a/two", Failure::DmcaTakedown);
+    app.advance_and_settle(24 * HOUR).await;
+
+    tab.sees("Unavailable · 403").await;
+    tab.still_shows_the_marked_document().await;
+}
+
+#[tokio::test]
+async fn an_update_waits_while_a_dialog_is_open() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.mark_document().await;
+    tab.click_button("Add repo").await;
+    let typed = "https://example.com/half/typed";
+    tab.fill("Repo URL", typed).await;
+
+    let mut events = app.events().await;
+    app.advance_and_settle(24 * HOUR).await;
+    events.changed().await;
+    // As long again for the page to have heard of it.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    tab.sees_a_modal_dialog().await;
+    assert_eq!(tab.value_of("Repo URL").await, typed);
+    tab.sees("Not fetched yet").await;
+
+    tab.click_button("Cancel").await;
+    tab.stops_seeing(CLONES_RIGHT_AWAY).await;
+    tab.sees("Fetched just now").await;
+    tab.doesnt_see("Not fetched yet").await;
+    tab.still_shows_the_marked_document().await;
+}
+
+/// What a failed untrack says when the config file is broken.
+const UNTRACK_FAILED: &str = "Couldn’t untrack the repo: the config file is invalid";
+
+#[tokio::test]
+async fn an_update_keeps_the_selection_the_scroll_position_and_a_failed_action_banner() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    // Enough repos to scroll; none of them need exist upstream. Forty in
+    // all split the interval into whole seconds.
+    let others: Vec<String> = (0..39)
+        .map(|i| format!("http://{}/b/r{i:02}", forge.host()))
+        .collect();
+    let mut repos: Vec<&str> = others.iter().map(String::as_str).collect();
+    repos.push(upstream.url());
+    let app = TestApp::tracking(&repos).await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.click_row("b/r30").await;
+    tab.arrives_at(&format!("/repos/{}/b/r30", forge.host()))
+        .await;
+
+    // Untracking fails on a broken config the app hasn't read yet.
+    app.write_config("repos = [");
+    tab.click_button("Untrack").await;
+    tab.click_button("Keep archive").await;
+    tab.sees(UNTRACK_FAILED).await;
+    tab.mark_document().await;
+    let scrolled = tab.scroll_to(600).await;
+    assert!(scrolled > 0.0, "the page scrolls");
+
+    // The app reads the broken config, and the page shows that.
+    app.advance_and_settle(MINUTE).await;
+    tab.sees("so the app keeps using the last good config")
+        .await;
+
+    tab.still_shows_the_marked_document().await;
+    tab.sees(UNTRACK_FAILED).await;
+    assert_eq!(
+        tab.shown(".repo-table [aria-current]").await,
+        [format!("{}/b/r30", forge.host())]
+    );
+    assert_eq!(tab.shown(".pane .repo-url").await, [others[30].clone()]);
+    assert_eq!(tab.scroll_y().await, scrolled);
+}
+
+#[tokio::test]
+async fn a_repo_page_whose_repo_is_untracked_and_deleted_elsewhere_moves_to_the_list() {
+    let (forge, app, [one, two]) = app_tracking_two_repos().await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let page = format!("/repos/{}/a/two", forge.host());
+    let tab = browser.open(&format!("http://{}{page}", app.addr())).await;
+    tab.sees(&two).await;
+    tab.mark_document().await;
+
+    app.untrack_from_page(&page, "Delete archive").await;
+
+    tab.arrives_at("/").await;
+    tab.sees(&one).await;
+    tab.stops_seeing("a/two").await;
+    tab.still_shows_the_marked_document().await;
+}
+
 #[test]
 fn a_missing_browser_is_an_error_naming_the_variable_to_set() {
     let empty = Some(std::ffi::OsString::from("/nonexistent"));

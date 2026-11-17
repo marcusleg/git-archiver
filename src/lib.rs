@@ -20,6 +20,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::archive::Archives;
 use crate::clock::Clock;
@@ -42,6 +43,8 @@ pub struct Options {
 pub struct RunningApp {
     addr: SocketAddr,
     shutdown: oneshot::Sender<()>,
+    /// Ends the open event streams, which the server would wait for.
+    closing: CancellationToken,
     server: JoinHandle<std::io::Result<()>>,
     scheduler: JoinHandle<()>,
 }
@@ -57,6 +60,7 @@ impl RunningApp {
     pub async fn shutdown(self) {
         self.scheduler.abort();
         let _ = self.scheduler.await;
+        self.closing.cancel();
         let _ = self.shutdown.send(());
         let _ = self.server.await;
     }
@@ -103,12 +107,14 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
         .run(),
     );
 
+    let closing = CancellationToken::new();
     let router = web::router(Arc::new(web::AppState {
         config_path: config::file_path(&data_dir),
         clock: options.clock,
         archives,
         overview,
         tracking,
+        closing: closing.clone(),
     }));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -123,6 +129,7 @@ pub async fn start(options: Options) -> anyhow::Result<RunningApp> {
     Ok(RunningApp {
         addr,
         shutdown,
+        closing,
         server,
         scheduler,
     })
