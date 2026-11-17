@@ -126,7 +126,11 @@ impl FakeForge {
 
     /// Serves the repo at `path` normally again.
     pub fn restore(&self, path: &str) {
-        self.behaviour.failing.lock().unwrap().remove(&repo_prefix(path));
+        self.behaviour
+            .failing
+            .lock()
+            .unwrap()
+            .remove(&repo_prefix(path));
     }
 
     /// Stops answering altogether: connections to the forge are refused
