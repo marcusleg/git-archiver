@@ -709,15 +709,15 @@ fn repo_card(card: &CardView, base: &str, now: SystemTime) -> Markup {
     let clone = archived.then(|| git_http::clone_command(base, id));
     let mirror_clone = archived.then(|| git_http::mirror_clone_command(base, id));
     let fetched = state.status == Some(Status::Available);
-    // The status line, and whether the facts add "Last success": an
-    // Available repo's status line already says when, and otherwise there
-    // is no success to show.
     // An Available repo with no recorded success reads as not fetched yet.
     let shown = match (state.status, state.last_success) {
         (Some(Status::Available), None) => None,
         (status, _) => status,
     };
     let StatusView { icon, class, label } = status_view(shown);
+    // The status line, and whether the facts add "Last success": an
+    // Available repo's status line already says when, and otherwise there
+    // is no success to show.
     let (status_line, show_last_success) = match (shown, state.last_success) {
         (Some(Status::Available), Some(success)) => (
             html! {
