@@ -298,6 +298,39 @@ impl TestApp {
         list_page::ListPage::parse(&page.text())
     }
 
+    /// Opens the untrack dialog on the card in the pane of the page at
+    /// `path` and clicks the button labelled `choice`, the way a browser
+    /// submits it.
+    pub async fn untrack_from_page(&self, path: &str, choice: &str) -> Page {
+        use list_page::{select_in, text};
+        let list = self.page(path).await;
+        let card = list.pane_card().expect("the page has a pane");
+        let form = select_in(&card, "dialog form")
+            .into_iter()
+            .next()
+            .expect("the pane's card has an untrack dialog");
+        assert_eq!(form.value().attr("method"), Some("post"));
+        let mut fields: Vec<(&str, &str)> = select_in(&form, "input[type=hidden]")
+            .iter()
+            .map(|input| {
+                let input = input.value();
+                (
+                    input.attr("name").unwrap(),
+                    input.attr("value").unwrap_or(""),
+                )
+            })
+            .collect();
+        let button = select_in(&form, "button")
+            .into_iter()
+            .find(|button| text(button) == choice)
+            .unwrap_or_else(|| panic!("the untrack dialog has no {choice:?} button"));
+        if let Some(name) = button.value().attr("name") {
+            fields.push((name, button.value().attr("value").unwrap_or("")));
+        }
+        self.post_form(form.value().attr("action").unwrap(), &fields)
+            .await
+    }
+
     /// Fills in the add form in the list page's add dialog with this URL and
     /// submits it.
     pub async fn add_repo(&self, url: &str) -> Page {

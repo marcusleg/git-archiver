@@ -230,8 +230,8 @@ main {
   text-decoration: underline;
 }
 
-/* Below 60rem one column: the list page shows the list only, and a repo's
-   page "All repos" and the card only. */
+/* Below 60rem one column: the list page shows only the list, and a repo's
+   page shows only "All repos" and the card. */
 @media (max-width: 60rem) {
   .columns {
     grid-template-columns: minmax(0, 1fr);
@@ -314,6 +314,16 @@ main {
   text-decoration: underline;
 }
 
+/* Focus rings the whole row the link covers. */
+.row-link:focus-visible {
+  outline: none;
+}
+
+.repo-table tbody tr:has(.row-link:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
 .repo-table tbody tr:hover td {
   background: var(--surface-hover);
 }
@@ -337,12 +347,12 @@ main {
   margin: 0;
 }
 
-.repo-table tr[aria-current="true"] td {
+.repo-table tr:has(.row-link[aria-current="true"]) td {
   background: var(--surface-hover);
 }
 
 /* A stripe at the selected row's left edge, drawn inside the cell. */
-.repo-table tr[aria-current="true"] td:first-child {
+.repo-table tr:has(.row-link[aria-current="true"]) td:first-child {
   background-image: linear-gradient(var(--primary), var(--primary));
   background-size: 3px 100%;
   background-repeat: no-repeat;

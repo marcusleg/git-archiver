@@ -155,39 +155,14 @@ async fn an_untracked_archives_page_shows_its_read_only_card() {
     );
 }
 
-/// Sends the untrack dialog on `repo_page`'s card with the button labelled
-/// `choice`, the way a browser submits it.
-async fn untrack_from(app: &TestApp, repo_page: &str, choice: &str) -> common::Page {
-    let list = app.page(repo_page).await;
-    let card = list.pane_card().expect("the page has a pane");
-    let form = select_in(&card, "dialog form")[0];
-    let mut fields: Vec<(&str, &str)> = select_in(&form, "input[type=hidden]")
-        .iter()
-        .map(|input| {
-            (
-                input.value().attr("name").unwrap(),
-                input.value().attr("value").unwrap_or(""),
-            )
-        })
-        .collect();
-    let button = select_in(&form, "button")
-        .into_iter()
-        .find(|b| text(b) == choice)
-        .unwrap();
-    fields.push((
-        button.value().attr("name").unwrap(),
-        button.value().attr("value").unwrap(),
-    ));
-    let action = form.value().attr("action").unwrap();
-    app.post_form(action, &fields).await
-}
-
 #[tokio::test]
 async fn untracking_from_a_repos_page_leads_back_to_the_list_whatever_happens_to_the_archive() {
     for choice in ["Keep archive", "Delete archive"] {
         let app = two_repos().await;
 
-        let page = untrack_from(&app, "/repos/gitlab.com/group/sub/project", choice).await;
+        let page = app
+            .untrack_from_page("/repos/gitlab.com/group/sub/project", choice)
+            .await;
 
         assert_eq!(page.status, 200, "{choice}: {}", page.text());
         assert_eq!(page.path, "/", "{choice}");

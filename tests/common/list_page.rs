@@ -45,7 +45,7 @@ pub struct Row {
     pub size: String,
     /// Where the repo name links to: the repo's page.
     pub href: String,
-    /// Whether the row is marked as the repo the pane shows.
+    /// Whether the row's link is marked as the repo the pane shows.
     pub selected: bool,
 }
 
@@ -120,7 +120,7 @@ impl ListPage {
                         .and_then(|a| a.value().attr("href"))
                         .unwrap_or_else(|| panic!("the repo name is a link: {}", tr.html()))
                         .to_owned(),
-                    selected: tr.value().attr("aria-current") == Some("true"),
+                    selected: select_in(&cells[0], "a[aria-current=true]").len() == 1,
                 }
             })
             .collect()

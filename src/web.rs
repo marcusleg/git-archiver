@@ -55,7 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(list_page))
         .route("/repos", post(add_repo))
         .route("/repos/untrack", post(untrack_repo))
-        .route("/repos/{*identity}", get(repo_page))
+        .route("/repos/{*host_and_path}", get(repo_page))
         .route("/metrics", get(metrics))
         .route("/git/{*path}", any(git))
         .route("/assets/style.css", get(stylesheet))
@@ -208,7 +208,7 @@ async fn untrack_repo(
     let base = endpoint_base(&headers, &uri);
     let form = AddForm::default();
     // The page for the repo, or the list if the repo is gone after all.
-    let page = match render_repo(&app, &form, Some(&error), &id, &base).await {
+    let page = match render_page(&app, &form, Some(&error), Page::Repo(&id), &base).await {
         Some(page) => page,
         None => render_list(&app, &form, Some(&error), &base).await,
     };
@@ -258,10 +258,10 @@ async fn repo_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
         return not_found();
     };
     if id.host_and_path() != requested {
-        return Redirect::permanent(&repo_page_path(&id)).into_response();
+        return Redirect::temporary(&repo_page_path(&id)).into_response();
     }
     let base = endpoint_base(&headers, &uri);
-    match render_repo(&app, &AddForm::default(), None, &id, &base).await {
+    match render_page(&app, &AddForm::default(), None, Page::Repo(&id), &base).await {
         Some(page) => page.into_response(),
         None => not_found(),
     }
@@ -324,38 +324,52 @@ async fn render_list(
     problem: Option<&str>,
     base: &str,
 ) -> Html<String> {
-    render_page(app, form, problem, None, base)
+    render_page(app, form, problem, Page::List, base)
         .await
         .expect("the list page needs no particular repo")
 }
 
-/// The page of the repo `id`, or `None` if the app knows no such repo.
-async fn render_repo(
-    app: &AppState,
-    form: &AddForm,
-    problem: Option<&str>,
-    id: &RepoId,
-    base: &str,
-) -> Option<Html<String>> {
-    render_page(app, form, problem, Some(id), base).await
+/// Which page shows the list: the list page, or a repo's own page.
+#[derive(Clone, Copy)]
+enum Page<'a> {
+    List,
+    Repo(&'a RepoId),
 }
 
-/// The list, with `repo`'s card in the pane on its own page or the first
-/// tracked repo's on the list page. `problem` says why the last action
-/// failed. `None` if the app knows no such repo.
+impl Page<'_> {
+    fn title(self) -> String {
+        match self {
+            Page::List => "Git Archiver".to_owned(),
+            Page::Repo(id) => format!("{} · Git Archiver", id.host_and_path()),
+        }
+    }
+
+    /// The class that tells the narrow layout to show the list only, or
+    /// the card only.
+    fn class(self) -> &'static str {
+        match self {
+            Page::List => "list-page",
+            Page::Repo(_) => "repo-page",
+        }
+    }
+}
+
+/// `page`, with its repo's card in the pane, or the first tracked repo's on
+/// the list page. `problem` says why the last action failed. `None` if the
+/// app knows no such repo.
 async fn render_page(
     app: &AppState,
     form: &AddForm,
     problem: Option<&str>,
-    repo: Option<&RepoId>,
+    page: Page<'_>,
     base: &str,
 ) -> Option<Html<String>> {
     let on_disk = app.archives.list().await;
     let view = app.overview.view(&on_disk);
     let config_error = view.config_error;
-    let selected = match repo {
-        Some(id) => Some(view.repos.iter().find(|r| &r.id == id)?),
-        None => view.repos.iter().find(|r| r.tracked),
+    let selected = match page {
+        Page::Repo(id) => Some(view.repos.iter().find(|r| &r.id == id)?),
+        Page::List => view.repos.iter().find(|r| r.tracked),
     };
     let selected = match selected {
         Some(repo) => Some(card_view(app, repo).await),
@@ -364,17 +378,10 @@ async fn render_page(
     let selected_id = selected.as_ref().map(|card| &card.id);
     let (tracked, untracked): (Vec<_>, Vec<_>) = view.repos.into_iter().partition(|r| r.tracked);
     let now = app.clock.now();
-    let (title, page_class) = match repo {
-        Some(id) => (
-            format!("{} · Git Archiver", id.host_and_path()),
-            "repo-page",
-        ),
-        None => ("Git Archiver".to_owned(), "list-page"),
-    };
 
     Some(Html(
         layout(
-            &title,
+            &page.title(),
             html! {
                 @if let Some(problem) = problem {
                     div .card.banner role="alert" {
@@ -395,7 +402,7 @@ async fn render_page(
                         }
                     }
                 }
-                div .columns.(page_class) {
+                div .columns.(page.class()) {
                     div .list {
                         @if tracked.is_empty() {
                             section .card.empty {
@@ -433,7 +440,7 @@ async fn render_page(
                     }
                     @if let Some(card) = &selected {
                         aside .pane aria-label="Selected repo" {
-                            @if repo.is_some() {
+                            @if let Page::Repo(_) = page {
                                 a .back href="/" { (back_to_list()) }
                             }
                             (repo_card(card, base, now))
@@ -477,11 +484,11 @@ fn repo_table(repos: &[RepoView], selected: Option<&RepoId>, now: SystemTime) ->
 /// on it selects the repo.
 fn repo_row(repo: &RepoView, selected: bool, now: SystemTime) -> Markup {
     let state = repo.state.clone().unwrap_or_default();
-    let current = selected.then_some("true");
     html! {
-        tr aria-current=[current] {
+        tr {
             td .repo title=(repo.title) {
-                a .row-link href=(repo_page_path(&repo.id)) aria-current=[current] {
+                a .row-link href=(repo_page_path(&repo.id))
+                    aria-current=[selected.then_some("true")] {
                     span .host { (repo.id.host()) "/" }
                     strong { (repo.id.path()) }
                 }
