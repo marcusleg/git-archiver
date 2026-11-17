@@ -27,6 +27,34 @@ fn css_urls(css: &str) -> Vec<String> {
         .collect()
 }
 
+/// What in a script would repeat the stylesheet's layout: each
+/// `matchMedia`, and each CSS length, a number directly followed by `rem`,
+/// `em` or `px`.
+fn layout_values(script: &str) -> Vec<String> {
+    let is_word_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let mut found: Vec<String> = script
+        .match_indices("matchMedia")
+        .map(|(_, name)| name.to_owned())
+        .collect();
+    let mut rest = script;
+    while let Some(start) = rest.find(|c: char| c.is_ascii_digit()) {
+        let in_word = rest[..start].ends_with(is_word_char);
+        let tail = &rest[start..];
+        let end = tail
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(tail.len());
+        let after = &tail[end..];
+        let unit = ["rem", "em", "px"]
+            .into_iter()
+            .find(|unit| after.starts_with(unit) && !after[unit.len()..].starts_with(is_word_char));
+        if !in_word && let Some(unit) = unit {
+            found.push(tail[..end + unit.len()].to_owned());
+        }
+        rest = after;
+    }
+    found
+}
+
 fn is_same_origin(url: &str) -> bool {
     url.starts_with("data:") || (!url.contains("://") && !url.starts_with("//"))
 }
@@ -70,37 +98,13 @@ async fn the_script_is_served_by_the_app() {
         script.contains("new EventSource(\"/events\")"),
         "the page script"
     );
-
-    // The stylesheet alone holds the narrow layout's breakpoint.
-    assert_eq!(layout_values(&script), Vec::<String>::new());
 }
 
-/// What in a script would repeat the stylesheet's layout: each
-/// `matchMedia`, and each CSS length, a number directly followed by `rem`,
-/// `em` or `px`.
-fn layout_values(script: &str) -> Vec<String> {
-    let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
-    let mut found: Vec<String> = script
-        .match_indices("matchMedia")
-        .map(|(_, name)| name.to_owned())
-        .collect();
-    let mut rest = script;
-    while let Some(start) = rest.find(|c: char| c.is_ascii_digit()) {
-        let in_word = rest[..start].ends_with(word);
-        let digits = &rest[start..];
-        let end = digits
-            .find(|c: char| !c.is_ascii_digit() && c != '.')
-            .unwrap_or(digits.len());
-        let after = &digits[end..];
-        let unit = ["rem", "em", "px"]
-            .into_iter()
-            .find(|unit| after.starts_with(unit) && !after[unit.len()..].starts_with(word));
-        if let (false, Some(unit)) = (in_word, unit) {
-            found.push(digits[..end + unit.len()].to_owned());
-        }
-        rest = &digits[end..];
-    }
-    found
+#[tokio::test]
+async fn the_stylesheet_alone_holds_the_layout_breakpoint() {
+    let app = TestApp::start().await;
+    let script = app.get("/assets/script.js").await.text();
+    assert_eq!(layout_values(&script), Vec::<String>::new());
 }
 
 #[test]
