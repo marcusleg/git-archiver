@@ -50,6 +50,12 @@ pub struct Row {
     pub selected: bool,
 }
 
+/// The pane's card, the only one on a page.
+pub const PANE_CARD: &str = "main aside article";
+
+/// The add form: the form in a dialog that posts a repo URL.
+const ADD_FORM: &str = "dialog form:has(input[name=url])";
+
 pub struct AppPage {
     pub html: Html,
 }
@@ -147,6 +153,20 @@ impl AppPage {
         form
     }
 
+    /// The add form, after checking it posts.
+    pub fn add_form(&self) -> ElementRef<'_> {
+        self.posting_form(ADD_FORM)
+    }
+
+    /// The add dialog: the dialog the add form is in.
+    pub fn add_dialog(&self) -> ElementRef<'_> {
+        self.add_form()
+            .ancestors()
+            .filter_map(ElementRef::wrap)
+            .find(|ancestor| ancestor.value().name() == "dialog")
+            .expect("the add form is in a dialog")
+    }
+
     pub fn tracked(&self) -> Vec<Row> {
         self.rows("Tracked repos")
     }
@@ -162,7 +182,7 @@ impl AppPage {
 
     /// The card in the detail pane, if the page has a pane.
     pub fn pane_card(&self) -> Option<ElementRef<'_>> {
-        let cards = select(&self.html, "main aside article");
+        let cards = select(&self.html, PANE_CARD);
         assert!(cards.len() <= 1, "the pane shows one card");
         cards.into_iter().next()
     }

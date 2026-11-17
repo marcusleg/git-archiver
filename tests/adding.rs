@@ -24,17 +24,11 @@ fn form_value(page: &Page) -> Option<String> {
         .and_then(|input| input.value().attr("value").map(str::to_owned))
 }
 
-/// The add dialog: the dialog holding the form that posts a repo URL.
-fn add_dialog(html: &Html) -> ElementRef<'_> {
-    let dialogs = select(html, "dialog:has(form input[name=url])");
-    assert_eq!(dialogs.len(), 1, "the page has one add dialog");
-    dialogs[0]
-}
-
 /// The "+ Add repo" buttons in `scope`, outside the dialog, each checked to
 /// open the add dialog.
-fn add_buttons<'a>(html: &Html, scope: &ElementRef<'a>) -> Vec<ElementRef<'a>> {
-    let dialog_id = add_dialog(html)
+fn add_buttons<'a>(page: &AppPage, scope: &ElementRef<'a>) -> Vec<ElementRef<'a>> {
+    let dialog_id = page
+        .add_dialog()
         .value()
         .attr("id")
         .expect("the dialog has an id")
@@ -72,16 +66,18 @@ async fn rows(app: &TestApp) -> Vec<(String, String)> {
 #[tokio::test]
 async fn the_heading_and_the_empty_state_each_have_an_add_button_opening_the_dialog() {
     let app = TestApp::start().await;
-    let html = Html::parse_document(&app.get("/").await.text());
-    let empty = select(&html, "main .card.empty")[0];
-    assert_eq!(add_buttons(&html, &empty).len(), 1, "in the empty state");
-    assert_eq!(add_buttons(&html, &select(&html, "main")[0]).len(), 1);
+    let page = app.list_page().await;
+    let html = &page.html;
+    let empty = select(html, "main .card.empty")[0];
+    assert_eq!(add_buttons(&page, &empty).len(), 1, "in the empty state");
+    assert_eq!(add_buttons(&page, &select(html, "main")[0]).len(), 1);
 
     let app = TestApp::tracking(&["https://github.com/foo/bar"]).await;
-    let html = Html::parse_document(&app.get("/").await.text());
-    let heading = select(&html, "main section .section-head:has(#tracked-heading)")[0];
-    assert_eq!(add_buttons(&html, &heading).len(), 1, "beside the heading");
-    assert_eq!(add_buttons(&html, &select(&html, "main")[0]).len(), 1);
+    let page = app.list_page().await;
+    let html = &page.html;
+    let heading = select(html, "main section .section-head:has(#tracked-heading)")[0];
+    assert_eq!(add_buttons(&page, &heading).len(), 1, "beside the heading");
+    assert_eq!(add_buttons(&page, &select(html, "main")[0]).len(), 1);
 }
 
 #[tokio::test]
@@ -91,8 +87,9 @@ async fn the_add_dialog_is_closed_and_holds_the_form() {
         TestApp::tracking(&["https://github.com/foo/bar"]).await,
     ] {
         let page = app.get("/").await;
-        let html = Html::parse_document(&page.text());
-        let dialog = add_dialog(&html);
+        let parsed = AppPage::parse(&page.text());
+        let html = &parsed.html;
+        let dialog = parsed.add_dialog();
         assert_eq!(dialog.value().attr("open"), None, "closed until asked for");
 
         let heading = &select_in(&dialog, "h2")[0];
@@ -105,13 +102,16 @@ async fn the_add_dialog_is_closed_and_holds_the_form() {
             select_in(&dialog, "p").iter().map(text).collect::<Vec<_>>(),
             ["The app clones it right away, then fetches it once per interval."]
         );
-        let parsed = AppPage::parse(&page.text());
-        let form = parsed.posting_form("dialog form:has(input[name=url])");
+        let form = parsed.add_form();
+        assert!(
+            form.ancestors().any(|node| node.id() == dialog.id()),
+            "the form is inside the add dialog"
+        );
         assert_eq!(form.value().attr("action"), Some("/repos"));
         let input = &select_in(&form, "input[name=url]")[0];
         let id = input.value().attr("id").unwrap();
         assert_eq!(
-            text(&select(&html, &format!("label[for={id}]"))[0]),
+            text(&select(html, &format!("label[for={id}]"))[0]),
             "Repo URL"
         );
         assert_eq!(
