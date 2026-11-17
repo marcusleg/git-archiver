@@ -1,8 +1,8 @@
 mod common;
 
+use common::app_page::{AppPage, select, text};
 use common::forge::{Failure, FakeForge};
 use common::git::refs;
-use common::list_page::{AppPage, select, text};
 use common::{HOUR, MINUTE, TestApp};
 use scraper::{Html, Selector};
 
@@ -184,7 +184,7 @@ async fn a_repo_added_to_the_config_shows_after_a_restart() {
     app.restart().await;
 
     let list = app.list_page().await;
-    let titles: Vec<_> = list.tracked().into_iter().map(|r| r.title).collect();
+    let titles = list.titles("Tracked repos");
     assert_eq!(titles, ["https://github.com/foo/bar"]);
     assert_eq!(
         list.pane_title().as_deref(),

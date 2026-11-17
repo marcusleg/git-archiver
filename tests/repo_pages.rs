@@ -3,8 +3,8 @@
 
 mod common;
 
+use common::app_page::{AppPage, select, select_in, text};
 use common::forge::FakeForge;
-use common::list_page::{AppPage, select, select_in, text};
 use common::{HOUR, MINUTE, TestApp};
 
 const BAR: &str = "https://github.com/foo/bar";
@@ -168,14 +168,7 @@ async fn untracking_from_a_repos_page_leads_back_to_the_list_whatever_happens_to
         assert_eq!(page.path, "/", "{choice}");
         let list = AppPage::parse(&page.text());
         assert_eq!(list.title(), "Git Archiver");
-        assert_eq!(
-            list.tracked()
-                .into_iter()
-                .map(|r| r.title)
-                .collect::<Vec<_>>(),
-            [BAR],
-            "{choice}"
-        );
+        assert_eq!(list.titles("Tracked repos"), [BAR], "{choice}");
     }
 }
 

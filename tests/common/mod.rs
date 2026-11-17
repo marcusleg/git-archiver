@@ -4,11 +4,11 @@
 
 #![allow(dead_code)]
 
+pub mod app_page;
 pub mod browser;
 pub mod clock;
 pub mod forge;
 pub mod git;
-pub mod list_page;
 pub mod logs;
 
 use std::net::SocketAddr;
@@ -302,29 +302,24 @@ impl TestApp {
     }
 
     /// The list page, parsed.
-    pub async fn list_page(&self) -> list_page::AppPage {
+    pub async fn list_page(&self) -> app_page::AppPage {
         self.page("/").await
     }
 
     /// The page at `path`, parsed, after checking it was found.
-    pub async fn page(&self, path: &str) -> list_page::AppPage {
+    pub async fn page(&self, path: &str) -> app_page::AppPage {
         let page = self.get(path).await;
         assert_eq!(page.status, 200, "GET {path}: {}", page.text());
-        list_page::AppPage::parse(&page.text())
+        app_page::AppPage::parse(&page.text())
     }
 
     /// Opens the untrack dialog on the card in the pane of the page at
     /// `path` and clicks the button labelled `choice`, the way a browser
     /// submits it.
     pub async fn untrack_from_page(&self, path: &str, choice: &str) -> Page {
-        use list_page::{select_in, text};
+        use app_page::{select_in, text};
         let list = self.page(path).await;
-        let card = list.pane_card().expect("the page has a pane");
-        let form = select_in(&card, "dialog form")
-            .into_iter()
-            .next()
-            .expect("the pane's card has an untrack dialog");
-        assert_eq!(form.value().attr("method"), Some("post"));
+        let form = list.posting_form(".pane dialog form");
         let mut fields: Vec<(&str, &str)> = select_in(&form, "input[type=hidden]")
             .iter()
             .map(|input| {
@@ -369,7 +364,7 @@ impl TestApp {
     pub async fn add_repo(&self, url: &str) -> Page {
         let list = self.list_page().await;
         let action = list
-            .post_form("dialog form:has(input[name=url])")
+            .posting_form("dialog form:has(input[name=url])")
             .value()
             .attr("action")
             .expect("form has an action")
