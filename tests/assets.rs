@@ -72,7 +72,53 @@ async fn the_script_is_served_by_the_app() {
     );
 
     // The stylesheet alone holds the narrow layout's breakpoint.
-    assert!(!script.contains("60rem"));
+    assert_eq!(layout_values(&script), Vec::<String>::new());
+}
+
+/// What in a script would repeat the stylesheet's layout: each
+/// `matchMedia`, and each CSS length, a number directly followed by `rem`,
+/// `em` or `px`.
+fn layout_values(script: &str) -> Vec<String> {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let mut found: Vec<String> = script
+        .match_indices("matchMedia")
+        .map(|(_, name)| name.to_owned())
+        .collect();
+    let mut rest = script;
+    while let Some(start) = rest.find(|c: char| c.is_ascii_digit()) {
+        let in_word = rest[..start].ends_with(word);
+        let digits = &rest[start..];
+        let end = digits
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(digits.len());
+        let after = &digits[end..];
+        let unit = ["rem", "em", "px"]
+            .into_iter()
+            .find(|unit| after.starts_with(unit) && !after[unit.len()..].starts_with(word));
+        if let (false, Some(unit)) = (in_word, unit) {
+            found.push(digits[..end + unit.len()].to_owned());
+        }
+        rest = &digits[end..];
+    }
+    found
+}
+
+#[test]
+fn layout_values_finds_media_queries_and_css_lengths() {
+    assert_eq!(
+        layout_values(r#"matchMedia("(max-width: 64rem)").matches"#),
+        ["matchMedia", "64rem"]
+    );
+    assert_eq!(
+        layout_values("if (innerWidth < 960) return"),
+        Vec::<String>::new()
+    );
+    assert_eq!(layout_values("el.style.width = \"960px\";"), ["960px"]);
+    assert_eq!(layout_values("const gap = 1.5em;"), ["1.5em"]);
+    assert_eq!(
+        layout_values("setTimeout(f, 1500); h1em; 2emit; x2px"),
+        Vec::<String>::new()
+    );
 }
 
 #[tokio::test]
