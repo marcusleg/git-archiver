@@ -91,7 +91,6 @@ impl ListPage {
             .map(|tr| {
                 let cells = select_in(tr, "td");
                 assert_eq!(cells.len(), 4, "a row has four cells: {}", tr.html());
-                let name = &select_in(&cells[0], "[title]")[0];
                 let time = select_in(&cells[2], "time").into_iter().next();
                 Row {
                     repo: text(&cells[0]),
@@ -103,7 +102,7 @@ impl ListPage {
                         .first()
                         .map(text)
                         .unwrap_or_default(),
-                    title: name.value().attr("title").unwrap().to_owned(),
+                    title: cells[0].value().attr("title").unwrap().to_owned(),
                     status: text(&cells[1]),
                     icon: select_in(&cells[1], "svg")
                         .first()

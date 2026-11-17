@@ -382,26 +382,20 @@ fn repo_table(repos: &[RepoView], selected: Option<&RepoId>, now: SystemTime) ->
     }
 }
 
+/// A repo's row: its identity with the configured URL on hover, its
+/// status, last success and size. `selected` marks the pane's repo.
 fn repo_row(repo: &RepoView, selected: bool, now: SystemTime) -> Markup {
     let state = repo.state.clone().unwrap_or_default();
-    let host_and_path = repo.id.host_and_path();
-    // An identity always has a host and a path.
-    let (host, path) = host_and_path.split_once('/').unwrap_or(("", host_and_path));
     html! {
         tr aria-current=[selected.then_some("true")] {
-            td .repo {
-                span .repo-name title=(repo.title) {
-                    span .host { (host) "/" }
-                    strong { (path) }
-                }
+            td .repo title=(repo.title) {
+                span .host { (repo.id.host()) "/" }
+                strong { (repo.id.path()) }
             }
             td { (status_label(&state)) }
             td { (time_or_never(state.last_success, now)) }
             td .num {
-                @match state.size_bytes {
-                    Some(bytes) => (format_size(bytes)),
-                    None => span .muted { "—" },
-                }
+                (size_or_dash(state.size_bytes))
             }
         }
     }
@@ -594,10 +588,7 @@ fn repo_card(card: &CardView, base: &str, now: SystemTime) -> Markup {
                 div {
                     dt { "Size" }
                     dd .num {
-                        @match state.size_bytes {
-                            Some(bytes) => (format_size(bytes)),
-                            None => span .muted { "—" },
-                        }
+                        (size_or_dash(state.size_bytes))
                     }
                 }
             }
@@ -800,6 +791,14 @@ fn time_ago(then: SystemTime, now: SystemTime) -> String {
     };
     let plural = if count == 1 { "" } else { "s" };
     format!("{count} {unit}{plural} ago")
+}
+
+/// [`format_size`] for `bytes`, or a muted dash without them.
+fn size_or_dash(bytes: Option<u64>) -> Markup {
+    match bytes {
+        Some(bytes) => html! { (format_size(bytes)) },
+        None => html! { span .muted { "—" } },
+    }
 }
 
 /// Bytes in decimal units: "512 B", "1.2 kB", "3.4 MB".
