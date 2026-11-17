@@ -9,6 +9,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The browser tests drive this Chrome, which the runner image ships.
+  GIT_ARCHIVER_TEST_BROWSER: google-chrome
 
 jobs:
   check:
@@ -21,6 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The tests drive the real `git` CLI; make sure it's there.
       - run: git --version
+      - run: google-chrome --version
       - run: cargo build --locked --all-targets
       - run: cargo test --locked
       - run: cargo fmt --check

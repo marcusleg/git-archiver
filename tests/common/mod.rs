@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+pub mod browser;
 pub mod clock;
 pub mod forge;
 pub mod git;

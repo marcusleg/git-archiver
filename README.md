@@ -195,6 +195,10 @@ Example alerts:
 
 Logs go to stdout. Every status change and every rewrite is logged with the repo and the preserved ref names, so you can alert on them from your log tooling too.
 
+## Testing
+
+`cargo test` runs the whole suite. It needs `git`, and Chrome or Chromium for the tests that drive the list page in a real headless browser. The browser is the first of `chromium`, `chromium-browser`, `google-chrome`, `google-chrome-stable` and `chrome` found on `PATH`; set `GIT_ARCHIVER_TEST_BROWSER` to a path or command name to pick another. Without one, those tests fail rather than skip.
+
 ## Releasing
 
 Push a tag that matches the version in `Cargo.toml`, such as `v0.1.0`. The [release workflow](.github/workflows/release.yml) builds the amd64 and arm64 binaries and the container image, smoke-tests the image, publishes the image to GHCR and attaches the binaries to a GitHub release. A tag with a suffix, such as `v0.2.0-rc.1`, makes a pre-release that doesn't move `latest`.
