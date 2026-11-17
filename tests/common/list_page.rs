@@ -49,11 +49,11 @@ pub struct Row {
     pub selected: bool,
 }
 
-pub struct ListPage {
+pub struct ArchivePage {
     pub html: Html,
 }
 
-impl ListPage {
+impl ArchivePage {
     pub fn parse(text: &str) -> Self {
         Self {
             html: Html::parse_document(text),
@@ -124,6 +124,27 @@ impl ListPage {
                 }
             })
             .collect()
+    }
+
+    /// The hover titles of the rows in the section headed `heading`, in
+    /// page order: the configured URL of a tracked repo, the identity of an
+    /// untracked archive. Empty if there is no such section.
+    pub fn titles(&self, heading: &str) -> Vec<String> {
+        self.rows(heading)
+            .into_iter()
+            .map(|row| row.title)
+            .collect()
+    }
+
+    /// The form that `selector` finds inside a dialog, after checking it
+    /// posts.
+    pub fn dialog_form(&self, selector: &str) -> ElementRef<'_> {
+        let form = select(&self.html, &format!("dialog {selector}"))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("the page has no dialog form {selector:?}"));
+        assert_eq!(form.value().attr("method"), Some("post"));
+        form
     }
 
     pub fn tracked(&self) -> Vec<Row> {

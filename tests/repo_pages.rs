@@ -4,7 +4,7 @@
 mod common;
 
 use common::forge::FakeForge;
-use common::list_page::{ListPage, select, select_in, text};
+use common::list_page::{ArchivePage, select, select_in, text};
 use common::{HOUR, MINUTE, TestApp};
 
 const BAR: &str = "https://github.com/foo/bar";
@@ -15,7 +15,7 @@ async fn two_repos() -> TestApp {
 }
 
 /// The configured URLs of the rows marked selected, across both tables.
-fn selected(list: &ListPage) -> Vec<String> {
+fn selected(list: &ArchivePage) -> Vec<String> {
     list.tracked()
         .into_iter()
         .chain(list.untracked())
@@ -79,7 +79,7 @@ async fn other_spellings_of_a_repos_identity_select_the_same_repo() {
             page.path, "/repos/gitlab.com/group/sub/project",
             "{spelling} leads to the canonical URL"
         );
-        let list = ListPage::parse(&page.text());
+        let list = ArchivePage::parse(&page.text());
         assert_eq!(list.pane_title().as_deref(), Some(PROJECT), "{spelling}");
         assert_eq!(selected(&list), [PROJECT], "{spelling}");
     }
@@ -99,7 +99,7 @@ async fn an_unknown_repo_is_not_found_with_a_link_back_to_the_list() {
     ] {
         let page = app.get(path).await;
         assert_eq!(page.status, 404, "{path}");
-        let list = ListPage::parse(&page.text());
+        let list = ArchivePage::parse(&page.text());
         let links: Vec<_> = select(&list.html, "main a")
             .iter()
             .map(|a| a.value().attr("href").unwrap_or_default().to_owned())
@@ -166,7 +166,7 @@ async fn untracking_from_a_repos_page_leads_back_to_the_list_whatever_happens_to
 
         assert_eq!(page.status, 200, "{choice}: {}", page.text());
         assert_eq!(page.path, "/", "{choice}");
-        let list = ListPage::parse(&page.text());
+        let list = ArchivePage::parse(&page.text());
         assert_eq!(list.title(), "Git Archiver");
         assert_eq!(
             list.tracked()
@@ -196,7 +196,7 @@ async fn a_failed_untrack_shows_that_repos_page_with_the_error() {
         .await;
 
     assert_eq!(page.status, 422);
-    let list = ListPage::parse(&page.text());
+    let list = ArchivePage::parse(&page.text());
     let alert = text(&select(&list.html, "main > [role=alert]")[0]);
     assert!(alert.contains("Couldn’t untrack the repo"), "{alert}");
     assert_eq!(list.pane_title().as_deref(), Some(PROJECT));
