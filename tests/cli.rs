@@ -25,6 +25,7 @@ struct Running {
     child: Child,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Running {
@@ -36,12 +37,13 @@ impl Running {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let stdout = capture(child.stdout.take().unwrap());
-        let stderr = capture(child.stderr.take().unwrap());
+        let (stdout, out_reader) = capture(child.stdout.take().unwrap());
+        let (stderr, err_reader) = capture(child.stderr.take().unwrap());
         Running {
             child,
             stdout,
             stderr,
+            readers: vec![out_reader, err_reader],
         }
     }
 
@@ -51,8 +53,12 @@ impl Running {
             Some(status) => format!("exited with {status}"),
             None => "still running".to_string(),
         };
-        // Give the reader threads a moment to drain a just-exited app.
-        std::thread::sleep(Duration::from_millis(100));
+        // An exited app closed its pipes, so its readers finish with the tail.
+        if status.starts_with("exited") {
+            for reader in self.readers.drain(..) {
+                let _ = reader.join();
+            }
+        }
         format!(
             "app {status}\n--- stdout ---\n{}\n--- stderr ---\n{}",
             self.stdout.lock().unwrap(),
@@ -64,10 +70,16 @@ impl Running {
     fn addr(&mut self) -> String {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let found = self.stdout.lock().unwrap().lines().find_map(|line| {
-                let rest = line.split("listening addr=").nth(1)?;
-                Some(rest.split_whitespace().next()?.to_string())
-            });
+            let found = self
+                .stdout
+                .lock()
+                .unwrap()
+                .split_inclusive('\n')
+                .find_map(|line| {
+                    let line = line.strip_suffix('\n')?;
+                    let rest = line.split("listening addr=").nth(1)?;
+                    Some(rest.split_whitespace().next()?.to_string())
+                });
             if let Some(addr) = found {
                 return addr;
             }
@@ -99,10 +111,12 @@ impl Drop for Running {
 }
 
 /// Collects a pipe on a background thread so the app never blocks writing.
-fn capture(mut pipe: impl Read + Send + 'static) -> Arc<Mutex<String>> {
+fn capture(
+    mut pipe: impl Read + Send + 'static,
+) -> (Arc<Mutex<String>>, std::thread::JoinHandle<()>) {
     let buffer = Arc::new(Mutex::new(String::new()));
     let sink = Arc::clone(&buffer);
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
         while let Ok(n) = pipe.read(&mut chunk) {
             if n == 0 {
@@ -113,7 +127,7 @@ fn capture(mut pipe: impl Read + Send + 'static) -> Arc<Mutex<String>> {
                 .push_str(&String::from_utf8_lossy(&chunk[..n]));
         }
     });
-    buffer
+    (buffer, reader)
 }
 
 fn fetch(addr: &str) -> std::io::Result<String> {
