@@ -40,9 +40,8 @@ async fn card(app: &TestApp, name: &str) -> String {
     list.pane_card().unwrap().html()
 }
 
-/// Opens the page of the tracked repo configured as `url`, opens the
-/// untrack dialog on its card and clicks the button labelled `choice`, the
-/// way a browser submits it.
+/// Untracks the tracked repo configured as `url` from its page, clicking
+/// the button labelled `choice` in the untrack dialog.
 async fn untrack(app: &TestApp, url: &str, choice: &str) -> Page {
     let row = app
         .list_page()
@@ -53,38 +52,7 @@ async fn untrack(app: &TestApp, url: &str, choice: &str) -> Page {
         .unwrap_or_else(|| panic!("{url} isn't tracked"));
     let list = app.page(&row.href).await;
     assert_eq!(list.pane_title().as_deref(), Some(url), "the pane's repo");
-    let card = list.pane_card().expect("the page has a pane");
-    let form = select_in(&card, "dialog form")
-        .into_iter()
-        .next()
-        .expect("the pane's card has an untrack dialog");
-    assert_eq!(form.value().attr("method"), Some("post"));
-    let action = form.value().attr("action").unwrap().to_owned();
-    let mut fields: Vec<(String, String)> = select_in(&form, "input[type=hidden]")
-        .iter()
-        .map(|input| {
-            let value = input.value();
-            (
-                value.attr("name").unwrap().to_owned(),
-                value.attr("value").unwrap_or("").to_owned(),
-            )
-        })
-        .collect();
-    let button = select_in(&form, "button")
-        .into_iter()
-        .find(|button| text(button) == choice)
-        .unwrap_or_else(|| panic!("the untrack dialog has no {choice:?} button"));
-    if let Some(name) = button.value().attr("name") {
-        fields.push((
-            name.to_owned(),
-            button.value().attr("value").unwrap_or("").to_owned(),
-        ));
-    }
-    let fields: Vec<(&str, &str)> = fields
-        .iter()
-        .map(|(n, v)| (n.as_str(), v.as_str()))
-        .collect();
-    app.post_form(&action, &fields).await
+    app.untrack_from_page(&row.href, choice).await
 }
 
 /// A forge with one repo holding a commit.
