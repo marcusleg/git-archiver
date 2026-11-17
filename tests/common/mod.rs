@@ -8,6 +8,7 @@ pub mod browser;
 pub mod clock;
 pub mod forge;
 pub mod git;
+pub mod list_page;
 pub mod logs;
 
 use std::net::SocketAddr;
@@ -281,6 +282,11 @@ impl TestApp {
             .await
             .expect("request succeeds");
         Page::from(response).await
+    }
+
+    /// The list page, parsed.
+    pub async fn list_page(&self) -> list_page::ListPage {
+        list_page::ListPage::parse(&self.get("/").await.text())
     }
 
     /// Fills in the list page's add form with this URL and submits it.

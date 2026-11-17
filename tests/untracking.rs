@@ -7,44 +7,21 @@ use common::forge::{FakeForge, Upstream};
 use common::git::{preserved_refs, refs};
 use std::time::Duration;
 
+use common::list_page::{select, select_in, text};
 use common::{HOUR, MINUTE, Page, TestApp, config_tracking, last_successes, three_repos, urls};
-use scraper::{ElementRef, Html, Selector};
+use scraper::Html;
 
-fn select<'a>(html: &'a Html, selector: &str) -> Vec<ElementRef<'a>> {
-    html.select(&Selector::parse(selector).unwrap()).collect()
-}
-
-fn select_in<'a>(element: &ElementRef<'a>, selector: &str) -> Vec<ElementRef<'a>> {
-    element
-        .select(&Selector::parse(selector).unwrap())
-        .collect()
-}
-
-fn text(element: &ElementRef) -> String {
-    element
-        .text()
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// The repo names on the cards of the list page section headed `heading`,
-/// e.g. "Tracked repos", in page order. Empty if there is no such section.
+/// The hover titles of the rows in the list page section headed `heading`,
+/// e.g. "Tracked repos", in page order: the configured URL of a tracked
+/// repo, the identity of an untracked archive. Empty if there is no such
+/// section.
 async fn section(app: &TestApp, heading: &str) -> Vec<String> {
-    let html = Html::parse_document(&app.get("/").await.text());
-    for section in select(&html, "main section") {
-        let Some(h2) = select_in(&section, "h2").into_iter().next() else {
-            continue;
-        };
-        if text(&h2).starts_with(heading) {
-            return select_in(&section, "article .repo-url")
-                .iter()
-                .map(text)
-                .collect();
-        }
-    }
-    Vec::new()
+    app.list_page()
+        .await
+        .rows(heading)
+        .into_iter()
+        .map(|row| row.title)
+        .collect()
 }
 
 async fn tracked(app: &TestApp) -> Vec<String> {
@@ -55,34 +32,38 @@ async fn untracked(app: &TestApp) -> Vec<String> {
     section(app, "Untracked archives").await
 }
 
-/// The card on the list page whose repo name is `name`, as HTML.
+/// The card in the list page's pane, as HTML, after checking it is the card
+/// for `name`.
 async fn card(app: &TestApp, name: &str) -> String {
-    let html = Html::parse_document(&app.get("/").await.text());
-    select(&html, "main article")
-        .into_iter()
-        .find(|card| select_in(card, ".repo-url").first().map(text).as_deref() == Some(name))
-        .unwrap_or_else(|| panic!("no card for {name}"))
-        .html()
+    let list = app.list_page().await;
+    assert_eq!(list.pane_title().as_deref(), Some(name), "the pane's repo");
+    list.pane_card().unwrap().html()
 }
 
-/// Opens the untrack dialog on the card for `url` and clicks the button
-/// labelled `choice`, the way a browser submits it.
+/// Opens the untrack dialog on the pane's card and clicks the button
+/// labelled `choice`, the way a browser submits it. Rows can't be selected
+/// yet and the pane shows the first tracked repo, so for any other repo the
+/// dialog's form is sent naming `url` instead.
 async fn untrack(app: &TestApp, url: &str, choice: &str) -> Page {
-    let html = Html::parse_fragment(&card(app, url).await);
-    let form = select(&html, "dialog form")
+    let list = app.list_page().await;
+    let card = list.pane_card().expect("the page has a pane");
+    let form = select_in(&card, "dialog form")
         .into_iter()
         .next()
-        .unwrap_or_else(|| panic!("the card for {url} has no untrack dialog"));
+        .expect("the pane's card has an untrack dialog");
     assert_eq!(form.value().attr("method"), Some("post"));
     let action = form.value().attr("action").unwrap().to_owned();
     let mut fields: Vec<(String, String)> = select_in(&form, "input[type=hidden]")
         .iter()
         .map(|input| {
             let value = input.value();
-            (
-                value.attr("name").unwrap().to_owned(),
-                value.attr("value").unwrap_or("").to_owned(),
-            )
+            let name = value.attr("name").unwrap().to_owned();
+            let value = if name == "repo" && list.pane_title().as_deref() != Some(url) {
+                url.to_owned()
+            } else {
+                value.attr("value").unwrap_or("").to_owned()
+            };
+            (name, value)
         })
         .collect();
     let button = select_in(&form, "button")
@@ -110,16 +91,15 @@ async fn forge_with(path: &str) -> (FakeForge, Upstream) {
     (forge, upstream)
 }
 
-async fn last_attempt_of(app: &TestApp, name: &str) -> String {
-    let html = Html::parse_fragment(&card(app, name).await);
-    let names = select(&html, "dt");
-    let values = select(&html, "dd");
-    names
-        .iter()
-        .zip(&values)
-        .find(|(dt, _)| text(dt) == "Last attempt")
-        .map(|(_, dd)| text(dd))
-        .unwrap()
+/// The last success shown in the row of the untracked archive `id`.
+async fn untracked_last_success(app: &TestApp, id: &str) -> String {
+    app.list_page()
+        .await
+        .untracked()
+        .into_iter()
+        .find(|row| row.title == id)
+        .unwrap_or_else(|| panic!("no untracked row for {id}"))
+        .last_success
 }
 
 #[tokio::test]
@@ -144,7 +124,7 @@ async fn untracking_with_keep_archive_stops_fetching_and_lists_the_archive_as_un
     upstream.commit("second");
     app.advance_and_settle(48 * HOUR).await;
     assert_eq!(refs(&archive), archived, "no longer fetched");
-    assert_eq!(last_attempt_of(&app, &id).await, "2 days ago");
+    assert_eq!(untracked_last_success(&app, &id).await, "2 days ago");
 }
 
 #[tokio::test]
@@ -480,10 +460,18 @@ async fn untracked_archives_are_read_only() {
     let form = [("repo", id.as_str()), ("archive", "delete")];
 
     untrack(&app, upstream.url(), "Keep archive").await;
-    let html = Html::parse_fragment(&card(&app, &id).await);
-    assert!(select(&html, "button[data-dialog]").is_empty());
-    assert!(select(&html, "dialog").is_empty());
-    assert!(!select(&html, ".clone-line").is_empty(), "still cloneable");
+    let list = app.list_page().await;
+    assert_eq!(list.untracked().len(), 1);
+    let openers = select(&list.html, "main button[data-dialog]");
+    assert_eq!(
+        openers.len(),
+        1,
+        "only the tracked repo's card offers to untrack"
+    );
+    assert_eq!(
+        list.pane_title().as_deref(),
+        Some("https://example.com/other/repo")
+    );
 
     let page = app.post_form("/repos/untrack", &form).await;
     assert_eq!(page.status, 200, "{}", page.text());
@@ -510,7 +498,7 @@ async fn untracking_while_the_config_is_invalid_says_so_and_changes_nothing() {
 
     assert_eq!(page.status, 422);
     let html = Html::parse_document(&page.text());
-    let alert = text(&select(&html, "main [role=alert]")[0]);
+    let alert = text(&select(&html, "main > [role=alert]")[0]);
     assert!(alert.contains("Couldn’t untrack the repo"), "{alert}");
     assert!(alert.contains("invalid"), "{alert}");
     assert_eq!(app.config(), broken);

@@ -78,8 +78,7 @@ async fn urls_with_the_same_repo_identity_share_one_archive() {
         Some(start + 24 * 3600),
         "one repo, so a 24h gap"
     );
-    let page = app.get("/").await.text();
-    assert_eq!(page.matches("<article").count(), 1, "{page}");
+    assert_eq!(app.list_page().await.tracked().len(), 1);
 }
 
 #[tokio::test]
@@ -93,8 +92,7 @@ async fn urls_differing_only_in_scheme_are_tracked_once() {
 
     app.advance_and_settle(24 * HOUR).await;
 
-    let page = app.get("/").await.text();
-    assert_eq!(page.matches("<article").count(), 1, "{page}");
+    assert_eq!(app.list_page().await.tracked().len(), 1);
     let metrics = app.metrics().await;
     let id = format!("http://{}/foo/bar", forge.host());
     assert_eq!(

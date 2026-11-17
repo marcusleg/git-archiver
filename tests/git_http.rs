@@ -146,24 +146,29 @@ async fn unknown_repos_traversal_and_non_archive_directories_get_a_404() {
 }
 
 #[tokio::test]
-async fn each_archived_repos_card_shows_a_clone_line_that_works_as_a_clone_command() {
+async fn an_archived_repos_card_shows_a_clone_line_that_works_as_a_clone_command() {
     let forge = FakeForge::start().await;
     let upstream = forge.create_repo("foo/bar");
     let tip = upstream.commit("first");
-    let app = TestApp::tracking(&[upstream.url(), "https://github.com/a/b"]).await;
-    app.advance_and_settle(12 * HOUR).await;
-    assert!(!app.archive("github.com/a/b").exists());
+    let app = TestApp::tracking(&[upstream.url()]).await;
+    let lines = async || -> Vec<String> {
+        let html = Html::parse_document(&app.get("/").await.text());
+        html.select(&Selector::parse("main article code.clone").unwrap())
+            .map(|code| code.text().collect())
+            .collect()
+    };
+    assert!(!app.archive(&format!("{}/foo/bar", forge.host())).exists());
+    assert_eq!(
+        lines().await,
+        Vec::<String>::new(),
+        "no clone line before there is an archive"
+    );
 
-    let html = Html::parse_document(&app.get("/").await.text());
-    let lines: Vec<String> = html
-        .select(&Selector::parse("main article code.clone").unwrap())
-        .map(|code| code.text().collect())
-        .collect();
-
+    app.advance_and_settle(24 * HOUR).await;
+    let lines = lines().await;
     assert_eq!(
         lines,
         [format!("git clone {}", endpoint(&app, &forge, "foo/bar"))],
-        "only the repo with an archive has a clone line"
     );
     let out = TempDir::new().unwrap();
     let args: Vec<&str> = lines[0].split_whitespace().skip(1).collect();
@@ -219,45 +224,40 @@ async fn a_card_with_preserved_refs_shows_a_mirror_clone_line_that_brings_them_a
     let rewritten = forge.create_repo("foo/bar");
     rewritten.commit("first");
     rewritten.tag("v1");
-    let untouched = forge.create_repo("foo/baz");
-    untouched.commit("first");
-    let app = TestApp::tracking(&[rewritten.url(), untouched.url()]).await;
-    // Two repos in a 24h interval are fetched 12h apart.
-    let interval = async || {
-        app.advance_and_settle(12 * HOUR).await;
-        app.advance_and_settle(12 * HOUR).await;
+    let app = TestApp::tracking(&[rewritten.url()]).await;
+    let bar = endpoint(&app, &forge, "foo/bar");
+    // The lines of the pane's card matching `selector`.
+    let card_lines = async |selector: &str| -> Vec<String> {
+        let html = Html::parse_document(&app.get("/").await.text());
+        html.select(&Selector::parse(&format!("main aside article {selector}")).unwrap())
+            .map(|code| code.text().collect())
+            .collect()
     };
-    interval().await;
+    app.advance_and_settle(24 * HOUR).await;
+    assert_eq!(card_lines("code.clone").await, [format!("git clone {bar}")]);
+    assert_eq!(
+        card_lines("code.mirror-clone").await,
+        Vec::<String>::new(),
+        "only a card with preserved refs offers a mirror clone"
+    );
+
     rewritten.force_push_new_history("rewritten");
     rewritten.move_tag("v1");
-    interval().await;
+    app.advance_and_settle(24 * HOUR).await;
     let preserved = preserved_refs(&app.archive(&format!("{}/foo/bar", forge.host())));
     assert_eq!(preserved.len(), 2, "{preserved:?}");
 
+    assert_eq!(
+        card_lines("code.clone").await,
+        [format!("git clone {bar}")],
+        "the plain clone line is unchanged"
+    );
+    assert_eq!(
+        card_lines(".preserved code.mirror-clone").await,
+        [format!("git clone --mirror {bar}")],
+    );
     let html = Html::parse_document(&app.get("/").await.text());
-    let card_lines = |selector: &str| -> Vec<Vec<String>> {
-        html.select(&Selector::parse("main article").unwrap())
-            .map(|card| {
-                card.select(&Selector::parse(selector).unwrap())
-                    .map(|code| code.text().collect())
-                    .collect()
-            })
-            .collect()
-    };
-    let bar = endpoint(&app, &forge, "foo/bar");
-    let baz = endpoint(&app, &forge, "foo/baz");
-
-    assert_eq!(
-        card_lines("code.clone"),
-        [[format!("git clone {bar}")], [format!("git clone {baz}")]],
-        "the plain clone lines are unchanged"
-    );
-    assert_eq!(
-        card_lines(".preserved code.mirror-clone"),
-        [vec![format!("git clone --mirror {bar}")], vec![]],
-        "only the card with preserved refs offers a mirror clone"
-    );
-    let mirror_clone = &card_lines(".preserved code.mirror-clone")[0][0];
+    let mirror_clone = card_lines(".preserved code.mirror-clone").await.remove(0);
     let button = html
         .select(&Selector::parse(".preserved .clone-line button[data-copy]").unwrap())
         .next()

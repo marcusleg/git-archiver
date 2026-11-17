@@ -3,21 +3,9 @@
 mod common;
 
 use common::forge::{DMCA_MESSAGE, DMCA_NOTICE, Failure, FakeForge};
+use common::list_page::{select, text};
 use common::{HOUR, Page, TestApp, last_successes, three_repos, urls};
-use scraper::{Html, Selector};
-
-fn select<'a>(html: &'a Html, selector: &str) -> Vec<scraper::ElementRef<'a>> {
-    html.select(&Selector::parse(selector).unwrap()).collect()
-}
-
-fn text(element: &scraper::ElementRef) -> String {
-    element
-        .text()
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+use scraper::Html;
 
 /// The add form's error message, if it shows one.
 fn form_error(page: &Page) -> Option<String> {
@@ -33,24 +21,13 @@ fn form_value(page: &Page) -> Option<String> {
         .and_then(|input| input.value().attr("value").map(str::to_owned))
 }
 
-/// Each card's repo URL and status line, in page order.
-async fn cards(app: &TestApp) -> Vec<(String, String)> {
-    let html = Html::parse_document(&app.get("/").await.text());
-    select(&html, "main article")
-        .iter()
-        .map(|card| {
-            let url = card
-                .select(&Selector::parse(".repo-url").unwrap())
-                .next()
-                .map(|e| text(&e))
-                .unwrap();
-            let status = card
-                .select(&Selector::parse(".status").unwrap())
-                .next()
-                .map(|e| text(&e))
-                .unwrap();
-            (url, status)
-        })
+/// Each tracked repo's row: its configured URL and status, in page order.
+async fn rows(app: &TestApp) -> Vec<(String, String)> {
+    app.list_page()
+        .await
+        .tracked()
+        .into_iter()
+        .map(|row| (row.title, row.status))
         .collect()
 }
 
@@ -86,11 +63,15 @@ async fn an_added_repo_is_cloned_right_away_and_shows_as_available() {
 
     assert_eq!(app.now(), start, "the clock didn't move");
     assert_eq!(
-        cards(&app).await,
-        [(upstream.url().to_owned(), "Fetched just now".to_owned())]
+        rows(&app).await,
+        [(upstream.url().to_owned(), "Available".to_owned())]
     );
     let html = Html::parse_document(&app.get("/").await.text());
-    assert_eq!(select(&html, "main article .status.available").len(), 1);
+    let status = select(&html, "main aside article .status.available");
+    assert_eq!(
+        status.iter().map(text).collect::<Vec<_>>(),
+        ["Fetched just now"]
+    );
     let id = format!("http://{}/foo/bar", forge.host());
     assert_eq!(app.metrics().await.last_success(&id), Some(start));
     let archive = app.archive(&format!("{}/foo/bar", forge.host()));
@@ -223,7 +204,7 @@ async fn an_unreachable_repo_is_not_added_and_the_form_shows_gits_error() {
     );
 
     assert_eq!(app.config(), config);
-    assert!(cards(&app).await.is_empty());
+    assert!(rows(&app).await.is_empty());
 }
 
 #[tokio::test]

@@ -253,30 +253,24 @@ struct CardView {
     state: RepoState,
     inspection: Inspection,
     archived: bool,
+    tracked: bool,
 }
 
-async fn card_view(app: &AppState, title: String, id: RepoId, state: RepoState) -> CardView {
+async fn card_view(app: &AppState, repo: &RepoView) -> CardView {
+    let id = repo.id.clone();
     let inspection = app.archives.inspect(&id).await.unwrap_or_else(|e| {
         tracing::warn!(repo = %id, error = %format!("{e:#}"), "couldn't read archive");
         Inspection::default()
     });
     let archived = app.archives.exists(&id);
     CardView {
-        title,
+        title: repo.title.clone(),
         id,
-        state,
+        state: repo.state.clone().unwrap_or_default(),
         inspection,
         archived,
+        tracked: repo.tracked,
     }
-}
-
-/// Cards for archives given by title, identity and state.
-async fn card_views(app: &AppState, archives: Vec<(String, RepoId, RepoState)>) -> Vec<CardView> {
-    let mut cards = Vec::with_capacity(archives.len());
-    for (title, id, state) in archives {
-        cards.push(card_view(app, title, id, state).await);
-    }
-    cards
 }
 
 /// The list page. `problem` says why the last action failed.
@@ -290,15 +284,13 @@ async fn render_list(
     let view = app.overview.view(&on_disk);
     let config_error = view.config_error;
     let (tracked, untracked): (Vec<_>, Vec<_>) = view.repos.into_iter().partition(|r| r.tracked);
-    let archives = |repos: Vec<RepoView>| {
-        repos
-            .into_iter()
-            .map(|r| (r.title, r.id, r.state.unwrap_or_default()))
-            .collect::<Vec<_>>()
+    // The pane shows the first tracked repo; untracked archives get no
+    // pane of their own until rows can be selected.
+    let selected = match tracked.first() {
+        Some(first) => Some(card_view(app, first).await),
+        None => None,
     };
-    let (tracked, untracked) = (archives(tracked), archives(untracked));
-    let cards = card_views(app, tracked).await;
-    let untracked_cards = card_views(app, untracked).await;
+    let selected_id = selected.as_ref().map(|card| &card.id);
     let now = app.clock.now();
 
     Html(
@@ -322,41 +314,42 @@ async fn render_list(
                     }
                 }
             }
-            (add_form(form))
-            @if cards.is_empty() {
-                section .card.empty {
-                    (icon_archive())
-                    h2 { "No repos tracked yet" }
-                    p {
-                        "Add one above, or list repo URLs under " code { "repos" } " in "
-                        code { (app.config_path.display()) }
-                        ". The app picks up changes to the file within a minute."
+            div .columns {
+                div .list {
+                    (add_form(form))
+                    @if tracked.is_empty() {
+                        section .card.empty {
+                            (icon_archive())
+                            h2 { "No repos tracked yet" }
+                            p {
+                                "Add one above, or list repo URLs under " code { "repos" } " in "
+                                code { (app.config_path.display()) }
+                                ". The app picks up changes to the file within a minute."
+                            }
+                        }
+                    } @else {
+                        section aria-labelledby="tracked-heading" {
+                            h2 #tracked-heading .section-label {
+                                "Tracked repos " span .count { (tracked.len()) }
+                            }
+                            (repo_table(&tracked, selected_id, now))
+                        }
                     }
-                }
-            } @else {
-                section aria-labelledby="tracked-heading" {
-                    h2 #tracked-heading .section-label {
-                        "Tracked repos " span .count { (cards.len()) }
-                    }
-                    ul .repos {
-                        @for (i, card) in cards.iter().enumerate() {
-                            li { (repo_card(card, Some(i), base, now)) }
+                    @if !untracked.is_empty() {
+                        section aria-labelledby="untracked-heading" {
+                            h2 #untracked-heading .section-label {
+                                "Untracked archives " span .count { (untracked.len()) }
+                            }
+                            p .section-note {
+                                "No longer fetched. Add a repo again to continue its archive."
+                            }
+                            (repo_table(&untracked, None, now))
                         }
                     }
                 }
-            }
-            @if !untracked_cards.is_empty() {
-                section aria-labelledby="untracked-heading" {
-                    h2 #untracked-heading .section-label {
-                        "Untracked archives " span .count { (untracked_cards.len()) }
-                    }
-                    p .section-note {
-                        "No longer fetched. Add a repo again to continue its archive."
-                    }
-                    ul .repos {
-                        @for card in &untracked_cards {
-                            li { (repo_card(card, None, base, now)) }
-                        }
+                @if let Some(card) = &selected {
+                    aside .pane aria-label="Selected repo" {
+                        (repo_card(card, base, now))
                     }
                 }
             }
@@ -365,9 +358,82 @@ async fn render_list(
     )
 }
 
-/// The untrack button and its confirmation dialog, number `n` on the page.
-fn untrack_dialog(id: &RepoId, n: usize) -> Markup {
-    let dialog = format!("untrack-{n}");
+/// A table of repos, one row each, marking the row of the repo the pane
+/// shows.
+fn repo_table(repos: &[RepoView], selected: Option<&RepoId>, now: SystemTime) -> Markup {
+    html! {
+        div .card.table-card {
+            table .repo-table {
+                thead {
+                    tr {
+                        th scope="col" { "Repo" }
+                        th scope="col" { "Status" }
+                        th scope="col" { "Last success" }
+                        th .num scope="col" { "Size" }
+                    }
+                }
+                tbody {
+                    @for repo in repos {
+                        (repo_row(repo, selected == Some(&repo.id), now))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn repo_row(repo: &RepoView, selected: bool, now: SystemTime) -> Markup {
+    let state = repo.state.clone().unwrap_or_default();
+    let host_and_path = repo.id.host_and_path();
+    // An identity always has a host and a path.
+    let (host, path) = host_and_path.split_once('/').unwrap_or(("", host_and_path));
+    html! {
+        tr aria-current=[selected.then_some("true")] {
+            td .repo {
+                span .repo-name title=(repo.title) {
+                    span .host { (host) "/" }
+                    strong { (path) }
+                }
+            }
+            td { (status_label(&state)) }
+            td { (time_or_never(state.last_success, now)) }
+            td .num {
+                @match state.size_bytes {
+                    Some(bytes) => (format_size(bytes)),
+                    None => span .muted { "—" },
+                }
+            }
+        }
+    }
+}
+
+/// A repo's status as an icon and a short label, for its row.
+fn status_label(state: &RepoState) -> Markup {
+    match state.status {
+        Some(Status::Available) => html! {
+            span .status.available { (icon_circle_check()) span { "Available" } }
+        },
+        Some(Status::Unavailable) => html! {
+            span .status.unavailable {
+                (icon_ban())
+                span {
+                    "Unavailable"
+                    @if let Some(http_status) = state.http_status { " · " (http_status) }
+                }
+            }
+        },
+        Some(Status::FetchFailed) => html! {
+            span .status.fetch-failed { (icon_refresh_cw_off()) span { "Fetch failed" } }
+        },
+        None => html! {
+            span .status { (icon_clock()) span { "Not fetched yet" } }
+        },
+    }
+}
+
+/// The untrack button and its confirmation dialog.
+fn untrack_dialog(id: &RepoId) -> Markup {
+    let dialog = "untrack";
     html! {
         button .button.secondary.small type="button" data-dialog=(dialog)
             aria-haspopup="dialog" { "Untrack" }
@@ -420,15 +486,16 @@ fn add_form(form: &AddForm) -> Markup {
     }
 }
 
-/// A repo's card. A tracked repo's card offers to untrack it, through the
-/// page's dialog number `dialog`; an untracked archive's card is read-only.
-fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime) -> Markup {
+/// A repo's card. A tracked repo's card offers to untrack it; an untracked
+/// archive's card is read-only.
+fn repo_card(card: &CardView, base: &str, now: SystemTime) -> Markup {
     let CardView {
         title,
         id,
         state,
         inspection,
         archived,
+        tracked,
     } = card;
     // Only an archive on disk can be cloned.
     let clone = archived.then(|| git_http::clone_command(base, id));
@@ -489,8 +556,8 @@ fn repo_card(card: &CardView, dialog: Option<usize>, base: &str, now: SystemTime
         article .card {
             div .card-head {
                 h3 .repo-url { (title) }
-                @if let Some(n) = dialog {
-                    (untrack_dialog(id, n))
+                @if *tracked {
+                    (untrack_dialog(id))
                 }
             }
             (status_line)
