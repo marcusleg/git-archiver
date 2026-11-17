@@ -142,7 +142,7 @@ async fn hand_edit_error(config: &str) -> HandEditError {
         .unwrap_or_else(|| panic!("{config:?}: no config warning: {page}"))
         .text()
         .collect();
-    let repos: Vec<String> = common::list_page::ListPage::parse(&page)
+    let repos: Vec<String> = common::list_page::ArchivePage::parse(&page)
         .tracked()
         .into_iter()
         .map(|row| row.title)

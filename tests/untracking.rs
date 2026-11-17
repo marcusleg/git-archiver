@@ -11,25 +11,12 @@ use common::list_page::{select, select_in, text};
 use common::{HOUR, MINUTE, Page, TestApp, config_tracking, last_successes, three_repos, urls};
 use scraper::Html;
 
-/// The hover titles of the rows in the list page section headed `heading`,
-/// e.g. "Tracked repos", in page order: the configured URL of a tracked
-/// repo, the identity of an untracked archive. Empty if there is no such
-/// section.
-async fn section(app: &TestApp, heading: &str) -> Vec<String> {
-    app.list_page()
-        .await
-        .rows(heading)
-        .into_iter()
-        .map(|row| row.title)
-        .collect()
-}
-
 async fn tracked(app: &TestApp) -> Vec<String> {
-    section(app, "Tracked repos").await
+    app.list_page().await.titles("Tracked repos")
 }
 
 async fn untracked(app: &TestApp) -> Vec<String> {
-    section(app, "Untracked archives").await
+    app.list_page().await.titles("Untracked archives")
 }
 
 /// The card in the list page's pane, as HTML, after checking it is the card

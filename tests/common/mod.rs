@@ -302,15 +302,15 @@ impl TestApp {
     }
 
     /// The list page, parsed.
-    pub async fn list_page(&self) -> list_page::ListPage {
+    pub async fn list_page(&self) -> list_page::ArchivePage {
         self.page("/").await
     }
 
     /// The page at `path`, parsed, after checking it was found.
-    pub async fn page(&self, path: &str) -> list_page::ListPage {
+    pub async fn page(&self, path: &str) -> list_page::ArchivePage {
         let page = self.get(path).await;
         assert_eq!(page.status, 200, "GET {path}: {}", page.text());
-        list_page::ListPage::parse(&page.text())
+        list_page::ArchivePage::parse(&page.text())
     }
 
     /// Opens the untrack dialog on the card in the pane of the page at
@@ -367,20 +367,13 @@ impl TestApp {
     /// Fills in the add form in the list page's add dialog with this URL and
     /// submits it.
     pub async fn add_repo(&self, url: &str) -> Page {
-        let page = self.get("/").await.text();
-        let action = {
-            let html = scraper::Html::parse_document(&page);
-            let selector = scraper::Selector::parse("dialog form:has(input[name=url])").unwrap();
-            let form = html
-                .select(&selector)
-                .next()
-                .unwrap_or_else(|| panic!("the list page has no add dialog: {page}"));
-            assert_eq!(form.value().attr("method"), Some("post"));
-            form.value()
-                .attr("action")
-                .expect("form has an action")
-                .to_owned()
-        };
+        let list = self.list_page().await;
+        let action = list
+            .dialog_form("form:has(input[name=url])")
+            .value()
+            .attr("action")
+            .expect("form has an action")
+            .to_owned();
         self.post_form(&action, &[("url", url)]).await
     }
 }

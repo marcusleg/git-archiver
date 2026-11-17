@@ -373,12 +373,12 @@ impl Tab {
     }
 
     async fn visible_button(&self, selector: &str, label: &str) -> Option<Element> {
-        for button in self.page.find_elements(selector).await.unwrap_or_default() {
-            let shown = button
+        for button in self.visible(selector).await {
+            let in_modal = button
                 .call_js_fn(
                     "function() {
                         const modal = document.querySelector('dialog:modal');
-                        return this.checkVisibility() && (!modal || modal.contains(this));
+                        return !modal || modal.contains(this);
                     }",
                     false,
                 )
@@ -387,7 +387,7 @@ impl Tab {
                 .and_then(|r| r.result.value)
                 == Some(true.into());
             let text = button.inner_text().await.ok().flatten().unwrap_or_default();
-            if shown && text.trim() == label {
+            if in_modal && text.trim() == label {
                 return Some(button);
             }
         }
