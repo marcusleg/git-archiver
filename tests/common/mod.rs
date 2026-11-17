@@ -22,6 +22,10 @@ use tempfile::TempDir;
 use clock::ManualClock;
 use forge::{FakeForge, Upstream};
 
+/// Asks the OS for any free local port.
+const ANY_PORT: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+
 pub const MINUTE: Duration = Duration::from_secs(60);
 pub const HOUR: Duration = Duration::from_secs(3600);
 
@@ -30,7 +34,7 @@ pub struct TestApp {
     clock: Arc<ManualClock>,
     app: Option<RunningApp>,
     /// Where the app last listened, for [`TestApp::start_again`].
-    listen: SocketAddr,
+    last_addr: SocketAddr,
 }
 
 pub struct Page {
@@ -108,7 +112,7 @@ impl TestApp {
     pub async fn start_error(config: &str) -> String {
         let app = Self::new();
         app.write_config(config);
-        match git_archiver::start(app.options()).await {
+        match git_archiver::start(app.options(ANY_PORT)).await {
             Ok(_) => panic!("app started with an invalid config"),
             Err(e) => format!("{e:#}"),
         }
@@ -119,7 +123,7 @@ impl TestApp {
             dir: TempDir::new().unwrap(),
             clock: ManualClock::new(),
             app: None,
-            listen: "127.0.0.1:0".parse().unwrap(),
+            last_addr: ANY_PORT,
         }
     }
 
@@ -129,22 +133,19 @@ impl TestApp {
     }
 
     async fn boot(&mut self) -> anyhow::Result<()> {
-        self.boot_listening("127.0.0.1:0".parse().unwrap()).await
+        self.boot_on(ANY_PORT).await
     }
 
-    async fn boot_listening(&mut self, listen: SocketAddr) -> anyhow::Result<()> {
-        let app = git_archiver::start(self.options_listening(listen)).await?;
-        self.listen = app.addr();
+    async fn boot_on(&mut self, listen: SocketAddr) -> anyhow::Result<()> {
+        let app = git_archiver::start(self.options(listen)).await?;
+        self.last_addr = app.addr();
         self.app = Some(app);
         Ok(())
     }
 
-    /// Binds to a random local port, overriding the config's `listen`.
-    fn options(&self) -> Options {
-        self.options_listening("127.0.0.1:0".parse().unwrap())
-    }
-
-    fn options_listening(&self, listen: SocketAddr) -> Options {
+    /// Binds to `listen` (by default a random local port), overriding the
+    /// config's `listen`.
+    fn options(&self, listen: SocketAddr) -> Options {
         Options {
             data_dir: self.dir.path().to_owned(),
             listen: Some(listen),
@@ -168,7 +169,7 @@ impl TestApp {
     /// Starts a stopped app again against the same data directory, on the
     /// address it had, so pages and clients that were talking to it find it.
     pub async fn start_again(&mut self) {
-        self.boot_listening(self.listen).await.expect("app restarts");
+        self.boot_on(self.last_addr).await.expect("app restarts");
     }
 
     pub fn data_dir(&self) -> &Path {

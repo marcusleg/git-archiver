@@ -1166,10 +1166,10 @@ if (main && "EventSource" in window) {
   const note = document.querySelector(".live-note");
   events.addEventListener("error", () => {
     lost = true;
-    if (note) note.hidden = false;
+    note.hidden = false;
   });
   events.addEventListener("open", () => {
-    if (note) note.hidden = true;
+    note.hidden = true;
     if (!lost) return;
     lost = false;
     stale = true;

@@ -135,10 +135,6 @@ code {
   font-size: 0.875rem;
 }
 
-.live-note[hidden] {
-  display: none;
-}
-
 .brand {
   position: relative;
   padding-block: 0.3em;
