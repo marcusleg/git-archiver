@@ -638,16 +638,15 @@ const UNTRACK_DIALOG: &str = "untrack";
 
 /// The untrack button and its confirmation dialog.
 fn untrack_dialog(id: &RepoId) -> Markup {
-    let dialog = UNTRACK_DIALOG;
     html! {
-        button .button.secondary.small type="button" commandfor=(dialog)
+        button .button.secondary.small type="button" commandfor=(UNTRACK_DIALOG)
             command="show-modal" aria-haspopup="dialog" { "Untrack" }
-        dialog #(dialog) .dialog aria-labelledby={ (dialog) "-title" }
-            aria-describedby={ (dialog) "-body" } {
+        dialog #(UNTRACK_DIALOG) .dialog aria-labelledby={ (UNTRACK_DIALOG) "-title" }
+            aria-describedby={ (UNTRACK_DIALOG) "-body" } {
             form method="post" action="/repos/untrack" {
                 input type="hidden" name="repo" value=(id);
-                h2 #{ (dialog) "-title" } { "Untrack “" (id.host_and_path()) "”?" }
-                p #{ (dialog) "-body" } {
+                h2 #{ (UNTRACK_DIALOG) "-title" } { "Untrack “" (id.host_and_path()) "”?" }
+                p #{ (UNTRACK_DIALOG) "-body" } {
                     "The app stops fetching it. You can keep the archive or delete it \
                      from disk; deleting can’t be undone."
                 }
