@@ -603,6 +603,7 @@ dependencies = [
  "chromiumoxide",
  "clap",
  "futures",
+ "futures-util",
  "humantime",
  "maud",
  "reqwest",

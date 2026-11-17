@@ -177,10 +177,10 @@ impl Browser {
         });
         let tab = Tab { page };
         // The page only loads while its clock runs, so run it in small steps
-        // until it has.
+        // until it has. The clock runs even while requests are pending: the
+        // page's event stream stays pending for as long as it's open.
         tab.wait_until("the page to load", || async {
-            tab.run_clock(VirtualTimePolicy::PauseIfNetworkFetchesPending, LOAD_STEP)
-                .await;
+            tab.run_clock(VirtualTimePolicy::Advance, LOAD_STEP).await;
             let loaded = "location.href !== 'about:blank' && document.readyState === 'complete'";
             let loaded = tab.page.evaluate(loaded).await.ok()?;
             loaded.into_value::<bool>().ok()?.then_some(())
@@ -582,6 +582,55 @@ impl Tab {
             .expect("a valid url")
             .path()
             .to_owned()
+    }
+
+    /// Marks the document shown now, for [`Tab::still_shows_the_marked_document`].
+    pub async fn mark_document(&self) {
+        self.page
+            .evaluate("window.testMark = true")
+            .await
+            .expect("mark the document");
+    }
+
+    /// Asserts the tab still shows the document [`Tab::mark_document`]
+    /// marked: it neither reloaded nor navigated away since.
+    pub async fn still_shows_the_marked_document(&self) {
+        let marked: bool = self
+            .page
+            .evaluate("window.testMark === true")
+            .await
+            .expect("read the mark")
+            .into_value()
+            .expect("the mark is a bool");
+        assert!(marked, "the page was reloaded or replaced");
+    }
+
+    /// Scrolls the page down to `y` pixels from the top, or as far as it
+    /// goes, and returns where it ended up. Waits for the fonts first: as
+    /// they load, the text changes size and the browser scrolls to keep
+    /// what's in view.
+    pub async fn scroll_to(&self, y: u32) -> f64 {
+        self.page
+            .evaluate(format!(
+                "document.fonts.ready.then(() => {{
+                    window.scrollTo({{ top: {y}, behavior: 'instant' }});
+                    return window.scrollY;
+                }})"
+            ))
+            .await
+            .expect("scroll")
+            .into_value()
+            .expect("the scroll position is a number")
+    }
+
+    /// How far the page is scrolled down, in pixels.
+    pub async fn scroll_y(&self) -> f64 {
+        self.page
+            .evaluate("window.scrollY")
+            .await
+            .expect("scroll position")
+            .into_value()
+            .expect("the scroll position is a number")
     }
 
     /// Reloads the page.

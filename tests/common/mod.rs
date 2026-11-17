@@ -331,6 +331,24 @@ impl TestApp {
             .await
     }
 
+    /// Opens the event stream at `/events`, as an open page does, and
+    /// returns once the app has answered with its headers: from then on,
+    /// every change reaches it.
+    pub async fn events(&self) -> Events {
+        let url = format!("http://{}/events", self.addr());
+        let response = reqwest::Client::new()
+            .get(&url)
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status().as_u16(), 200, "GET /events");
+        Events {
+            response,
+            buffer: String::new(),
+        }
+    }
+
     /// Fills in the add form in the list page's add dialog with this URL and
     /// submits it.
     pub async fn add_repo(&self, url: &str) -> Page {
@@ -349,6 +367,94 @@ impl TestApp {
                 .to_owned()
         };
         self.post_form(&action, &[("url", url)]).await
+    }
+}
+
+/// How long [`Events::changed`] waits for a `changed` event.
+const EVENT_PATIENCE: Duration = Duration::from_secs(10);
+
+/// An open connection to `/events`.
+pub struct Events {
+    response: reqwest::Response,
+    /// What arrived after the last complete event.
+    buffer: String,
+}
+
+/// What the event stream sent: an event, or a comment such as a heartbeat.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Sent {
+    /// An event, by its fields as sent, e.g. `["event: changed", "data:"]`.
+    Event(Vec<String>),
+    Comment,
+}
+
+impl Events {
+    /// A response header's value, if the app sent it.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.response
+            .headers()
+            .get(name)
+            .map(|v| v.to_str().expect("header is text"))
+    }
+
+    /// Waits for the next `changed` event, skipping comments, and fails the
+    /// test if none comes within [`EVENT_PATIENCE`]. The event carries
+    /// nothing but its name and the empty data browsers need to see it.
+    pub async fn changed(&mut self) {
+        let deadline = Instant::now() + EVENT_PATIENCE;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.next_within(left).await {
+                Some(Sent::Event(fields)) => {
+                    assert_eq!(
+                        fields,
+                        ["event: changed", "data:"],
+                        "a `changed` event, empty"
+                    );
+                    return;
+                }
+                Some(Sent::Comment) => {}
+                None => panic!("no `changed` event within {EVENT_PATIENCE:?}"),
+            }
+        }
+    }
+
+    /// Fails the test if an event arrives within `wait`. Comments don't
+    /// count.
+    pub async fn stays_quiet_for(&mut self, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.next_within(left).await {
+                Some(Sent::Event(fields)) => panic!("unexpected event: {fields:?}"),
+                Some(Sent::Comment) => {}
+                None => return,
+            }
+        }
+    }
+
+    /// The next event or comment, or `None` if nothing complete arrives
+    /// within `wait`.
+    pub async fn next_within(&mut self, wait: Duration) -> Option<Sent> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if let Some(end) = self.buffer.find("\n\n") {
+                let block: String = self.buffer.drain(..end + 2).collect();
+                let lines: Vec<String> = block[..end].lines().map(str::to_owned).collect();
+                return Some(if lines.iter().all(|line| line.starts_with(':')) {
+                    Sent::Comment
+                } else {
+                    Sent::Event(lines)
+                });
+            }
+            let chunk = tokio::time::timeout_at(deadline, self.response.chunk())
+                .await
+                .ok()?
+                .expect("the event stream stays readable")
+                .expect("the event stream stays open");
+            self.buffer
+                .push_str(std::str::from_utf8(&chunk).expect("events are UTF-8"));
+        }
     }
 }
 

@@ -12,7 +12,7 @@ Every tracked repo has one of three statuses:
 - **Unavailable**: upstream refused the repo with a 4xx response, such as a DMCA takedown or a deleted repo (except 408 and 429, which only ask to come back later). The archive is left untouched, and the repo keeps being fetched, so it becomes Available again if upstream restores it.
 - **Fetch failed**: a transient problem such as a 5xx response, a 408 or 429, a network error or a timeout. It says nothing about the repo's fate, never touches the archive, and is retried at the repo's next turn.
 
-A web UI lists every archive with its status, tip and preserved refs, and gives each repo its own page at `/repos/<host>/<path>`, such as `/repos/github.com/owner/repo`. You can add repos there or untrack them. Archives can be cloned read-only over HTTP, and `/metrics` exposes everything to Prometheus.
+A web UI lists every archive with its status, tip and preserved refs, and gives each repo its own page at `/repos/<host>/<path>`, such as `/repos/github.com/owner/repo`. You can add repos there or untrack them. With JavaScript on, open pages update themselves as fetches finish and repos come and go. Archives can be cloned read-only over HTTP, and `/metrics` exposes everything to Prometheus.
 
 The terms in bold are defined in [`CONTEXT.md`](CONTEXT.md).
 
@@ -165,6 +165,8 @@ Preserved refs are named `refs/preserved/<UTC time of the rewrite>/heads/<branch
 The endpoint refuses pushes. Each archive is also an ordinary bare repo in `repos/` in the data directory, so you can inspect or recover it with plain `git` even without the app.
 
 The clone commands in the UI use the host and port your browser reached the app on. Behind a reverse proxy, their scheme follows the `X-Forwarded-Proto` or `Forwarded: proto=` header, which most reverse proxies set, so a proxy that serves the app over HTTPS gets `https://` commands. Without either header, the commands use `http://`.
+
+Open pages learn of changes over a Server-Sent Events stream at `/events`, which stays open as long as the page does. The app sends `X-Accel-Buffering: no` so nginx passes events on as they come; another proxy may need response buffering turned off for that path, and a read timeout longer than the stream's 30-second heartbeat.
 
 ## Metrics
 
