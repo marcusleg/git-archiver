@@ -96,9 +96,10 @@ pub struct RepoView {
 /// Every repo the app knows, with what it remembers about fetching.
 #[derive(Debug, Clone)]
 pub struct View {
-    /// Tracked repos, then Untracked archives, each sorted by identity for
-    /// display (not the config or fetch order).
-    pub repos: Vec<RepoView>,
+    /// In config order.
+    pub tracked: Vec<RepoView>,
+    /// Untracked archives, by `<host>/<path>`.
+    pub untracked: Vec<RepoView>,
     pub next_fetch: Option<SystemTime>,
     pub last_fetch_duration: Option<Duration>,
     /// Failed fetches since the app started.
@@ -106,6 +107,13 @@ pub struct View {
     /// Fetches that found a rewrite since the app started.
     pub rewrites: u64,
     pub config_error: Option<String>,
+}
+
+impl View {
+    /// Every repo: the tracked ones, then the untracked archives.
+    pub fn repos(&self) -> impl Iterator<Item = &RepoView> {
+        self.tracked.iter().chain(&self.untracked)
+    }
 }
 
 impl Overview {
@@ -141,7 +149,7 @@ impl Overview {
     /// (by `<host>/<path>`) that no tracked repo uses.
     pub fn view(&self, on_disk: &[String]) -> View {
         let inner = self.inner();
-        let mut tracked: Vec<RepoView> = inner
+        let tracked = inner
             .tracked
             .iter()
             .map(|t| RepoView {
@@ -151,7 +159,7 @@ impl Overview {
                 state: inner.repo_state(&t.id).cloned(),
             })
             .collect();
-        let mut untracked: Vec<RepoView> = inner
+        let untracked = inner
             .untracked(on_disk)
             .into_iter()
             .map(|(id, state)| RepoView {
@@ -161,10 +169,9 @@ impl Overview {
                 state,
             })
             .collect();
-        tracked.sort_by(display_order);
-        untracked.sort_by(display_order);
         View {
-            repos: tracked.into_iter().chain(untracked).collect(),
+            tracked,
+            untracked,
             next_fetch: inner.next_fetch,
             last_fetch_duration: inner.last_fetch_duration,
             fetch_errors: inner.fetch_errors.clone(),
@@ -410,15 +417,6 @@ impl Inner {
             })
             .collect()
     }
-}
-
-/// Display order: by `<host>/<path>` compared case-insensitively, the exact
-/// string breaking ties. The scheme plays no part.
-fn display_order(a: &RepoView, b: &RepoView) -> std::cmp::Ordering {
-    let (a, b) = (a.id.host_and_path(), b.id.host_and_path());
-    a.to_lowercase()
-        .cmp(&b.to_lowercase())
-        .then_with(|| a.cmp(b))
 }
 
 /// The tracked repos for a config's repo list: the first URL for each
