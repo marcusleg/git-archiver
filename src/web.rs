@@ -1027,6 +1027,8 @@ fn layout(title: &str, live_path: Option<&str>, content: Markup) -> Markup {
             body {
                 header .app-header {
                     a .brand href="/" { "Git Archiver" }
+                    // Shown by the page script while the event stream is down.
+                    span .live-note role="status" hidden { "Live updates paused" }
                 }
                 main data-live=[live_path] { (content) }
                 script { (PreEscaped(SCRIPT)) }
@@ -1161,8 +1163,13 @@ if (main && "EventSource" in window) {
   });
   // Changes may have gone unannounced while the stream was down.
   let lost = false;
-  events.addEventListener("error", () => { lost = true; });
+  const note = document.querySelector(".live-note");
+  events.addEventListener("error", () => {
+    lost = true;
+    if (note) note.hidden = false;
+  });
   events.addEventListener("open", () => {
+    if (note) note.hidden = true;
     if (!lost) return;
     lost = false;
     stale = true;
