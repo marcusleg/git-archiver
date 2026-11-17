@@ -197,27 +197,59 @@ async fn app_tracking_two_repos() -> (FakeForge, TestApp, [String; 2]) {
     (forge, app, urls)
 }
 
+/// Forty tracked repos, enough to scroll: `a/one`, which exists upstream,
+/// first, then `b/r00` to `b/r38`, which don't. Forty split the interval
+/// into whole seconds. Returns their URLs in the order the list shows them.
+async fn app_tracking_a_long_list() -> (FakeForge, TestApp, Vec<String>) {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    let mut urls = vec![upstream.url().to_owned()];
+    urls.extend((0..39).map(|i| format!("http://{}/b/r{i:02}", forge.host())));
+    let repos: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let app = TestApp::tracking(&repos).await;
+    (forge, app, urls)
+}
+
 #[tokio::test]
-async fn clicking_a_row_on_a_desktop_shows_that_repo_in_the_pane() {
-    let (forge, app, [one, two]) = app_tracking_two_repos().await;
+async fn selecting_a_row_on_a_desktop_keeps_the_lists_scroll_position() {
+    let (forge, app, urls) = app_tracking_a_long_list().await;
     let browser = Browser::launch(Viewport::Desktop).await;
     let tab = browser.open(&format!("http://{}/", app.addr())).await;
-    tab.sees("Tracked repos").await;
-    tab.sees(&one).await;
-    tab.doesnt_see(&two).await;
+    let identity = |name: &str| format!("{}/{name}", forge.host());
+    let page = |name: &str| format!("/repos/{}", identity(name));
+    tab.shows_selected(&identity("a/one"), &urls[0]).await;
+    tab.mark_document().await;
 
-    tab.click_row("a/two").await;
-
-    let page = format!("/repos/{}/a/two", forge.host());
-    tab.arrives_at(&page).await;
-    tab.sees(&two).await;
-    tab.doesnt_see(&one).await;
-    tab.sees("Tracked repos").await;
+    // A row far down the list: the list stays where it was scrolled.
+    let scrolled = tab.scroll_row_into_view("b/r30").await;
+    assert!(scrolled > 0.0, "the page scrolls");
+    tab.click_row("b/r30").await;
+    tab.arrives_at(&page("b/r30")).await;
+    tab.shows_selected(&identity("b/r30"), &urls[31]).await;
+    assert_eq!(tab.scroll_y().await, scrolled);
     tab.doesnt_see("All repos").await;
 
+    let scrolled = tab.scroll_row_into_view("b/r35").await;
+    tab.click_row("b/r35").await;
+    tab.arrives_at(&page("b/r35")).await;
+    tab.shows_selected(&identity("b/r35"), &urls[36]).await;
+    assert_eq!(tab.scroll_y().await, scrolled);
+    tab.still_shows_the_marked_document().await;
+
+    // Back and forward move between the selections.
     tab.go_back().await;
-    tab.sees(&one).await;
-    tab.doesnt_see(&two).await;
+    tab.shows_selected(&identity("b/r30"), &urls[31]).await;
+    tab.go_back().await;
+    tab.arrives_at("/").await;
+    tab.shows_selected(&identity("a/one"), &urls[0]).await;
+    tab.go_forward().await;
+    tab.shows_selected(&identity("b/r30"), &urls[31]).await;
+    tab.still_shows_the_marked_document().await;
+
+    // The URL holds the selection.
+    tab.reload().await;
+    tab.shows_selected(&identity("b/r30"), &urls[31]).await;
 }
 
 #[tokio::test]
@@ -399,17 +431,7 @@ const UNTRACK_FAILED: &str = "Couldn’t untrack the repo: the config file is in
 
 #[tokio::test]
 async fn an_update_keeps_the_selection_the_scroll_position_and_a_failed_action_banner() {
-    let forge = FakeForge::start().await;
-    let upstream = forge.create_repo("a/one");
-    upstream.commit("first");
-    // Enough repos to scroll; none of them need exist upstream. Forty in
-    // all split the interval into whole seconds.
-    let others: Vec<String> = (0..39)
-        .map(|i| format!("http://{}/b/r{i:02}", forge.host()))
-        .collect();
-    let mut repos: Vec<&str> = others.iter().map(String::as_str).collect();
-    repos.push(upstream.url());
-    let app = TestApp::tracking(&repos).await;
+    let (forge, app, urls) = app_tracking_a_long_list().await;
     let browser = Browser::launch(Viewport::Desktop).await;
     let tab = browser.open(&format!("http://{}/", app.addr())).await;
     tab.click_row("b/r30").await;
@@ -436,7 +458,7 @@ async fn an_update_keeps_the_selection_the_scroll_position_and_a_failed_action_b
         tab.shown(".repo-table [aria-current]").await,
         [format!("{}/b/r30", forge.host())]
     );
-    assert_eq!(tab.shown(".pane .repo-url").await, [others[30].clone()]);
+    assert_eq!(tab.shown(".pane .repo-url").await, [urls[31].clone()]);
     assert_eq!(tab.scroll_y().await, scrolled);
 }
 

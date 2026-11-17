@@ -505,17 +505,59 @@ impl Tab {
     /// Clicks the visible table row that mentions `name`, on its status
     /// cell rather than the repo name, with a real mouse click.
     pub async fn click_row(&self, name: &str) {
-        let cell = self
-            .wait_until(&format!("a visible row {name:?}"), || async {
-                for row in self.visible("tbody tr").await {
-                    if inner_text(&row).await.contains(name) {
-                        return row.find_element("td:nth-child(2)").await.ok();
-                    }
-                }
-                None
-            })
-            .await;
+        let cell = self.row_cell(name).await;
         self.click_on(&cell).await;
+    }
+
+    /// Scrolls the visible table row that mentions `name` to the middle of
+    /// the screen, as [`Tab::click_row`] does before clicking, and returns
+    /// how far the page is scrolled down then. Waits for the fonts first,
+    /// as [`Tab::scroll_to`] does.
+    pub async fn scroll_row_into_view(&self, name: &str) -> f64 {
+        let cell = self.row_cell(name).await;
+        cell.call_js_fn(
+            "function() {
+                return document.fonts.ready.then(() => {
+                    this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                    return window.scrollY;
+                });
+            }",
+            true,
+        )
+        .await
+        .expect("scroll the row into view")
+        .result
+        .value
+        .and_then(|y| y.as_f64())
+        .expect("the scroll position is a number")
+    }
+
+    /// The status cell of the visible table row that mentions `name`.
+    async fn row_cell(&self, name: &str) -> Element {
+        self.wait_until(&format!("a visible row {name:?}"), || async {
+            for row in self.visible("tbody tr").await {
+                if inner_text(&row).await.contains(name) {
+                    return row.find_element("td:nth-child(2)").await.ok();
+                }
+            }
+            None
+        })
+        .await
+    }
+
+    /// Waits until the row of the repo `identity` is the one marked
+    /// selected and the pane shows the card of the repo configured as
+    /// `url`.
+    pub async fn shows_selected(&self, identity: &str, url: &str) {
+        self.wait_until(
+            &format!("{identity:?} to be selected, with {url:?} in the pane"),
+            || async {
+                let row = self.shown(".repo-table [aria-current]").await;
+                let card = self.shown(".pane .repo-url").await;
+                (row == [identity] && card == [url]).then_some(())
+            },
+        )
+        .await;
     }
 
     /// Clicks the visible link whose text contains `label`, with a real
@@ -584,25 +626,33 @@ impl Tab {
 
     /// Goes back one page in the tab's history, as the back button does.
     pub async fn go_back(&self) {
+        self.go_through_history(-1).await;
+    }
+
+    /// Goes forward one page in the tab's history, as the forward button
+    /// does.
+    pub async fn go_forward(&self) {
+        self.go_through_history(1).await;
+    }
+
+    /// Goes `by` pages back (negative) or forward in the tab's history.
+    async fn go_through_history(&self, by: i64) {
         let history = self
             .page
             .execute(GetNavigationHistoryParams::default())
             .await
             .expect("history")
             .result;
-        let current = usize::try_from(history.current_index).expect("a history index");
-        assert!(current > 0, "there is no page to go back to");
-        let previous = &history.entries[current - 1];
+        let entry = usize::try_from(history.current_index + by)
+            .ok()
+            .and_then(|index| history.entries.get(index))
+            .unwrap_or_else(|| panic!("there is no page {by} away in the history"));
         self.page
-            .execute(NavigateToHistoryEntryParams::new(previous.id))
+            .execute(NavigateToHistoryEntryParams::new(entry.id))
             .await
-            .expect("going back");
-        self.arrives_at(
-            url::Url::parse(&previous.url)
-                .expect("a history URL")
-                .path(),
-        )
-        .await;
+            .expect("moving through the history");
+        self.arrives_at(url::Url::parse(&entry.url).expect("a history URL").path())
+            .await;
     }
 
     /// The path of the page shown now, such as `/`.
