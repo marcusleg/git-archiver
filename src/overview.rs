@@ -76,7 +76,8 @@ pub struct RepoView {
 /// Every repo the app knows, with what it remembers about fetching.
 #[derive(Debug, Clone)]
 pub struct View {
-    /// Tracked repos in config order, then Untracked archives.
+    /// Tracked repos, then Untracked archives, each sorted by identity for
+    /// display (not the config or fetch order).
     pub repos: Vec<RepoView>,
     pub next_fetch: Option<SystemTime>,
     pub last_fetch_duration: Option<Duration>,
@@ -108,13 +109,17 @@ impl Overview {
     /// (by `<host>/<path>`) that no tracked repo uses.
     pub fn view(&self, on_disk: &[String]) -> View {
         let inner = self.inner();
-        let tracked = inner.tracked.iter().map(|t| RepoView {
-            title: t.url.clone(),
-            id: t.id.clone(),
-            tracked: true,
-            state: inner.repo_state(&t.id).cloned(),
-        });
-        let untracked = inner
+        let mut tracked: Vec<RepoView> = inner
+            .tracked
+            .iter()
+            .map(|t| RepoView {
+                title: t.url.clone(),
+                id: t.id.clone(),
+                tracked: true,
+                state: inner.repo_state(&t.id).cloned(),
+            })
+            .collect();
+        let mut untracked: Vec<RepoView> = inner
             .untracked(on_disk)
             .into_iter()
             .map(|(id, state)| RepoView {
@@ -122,9 +127,12 @@ impl Overview {
                 id,
                 tracked: false,
                 state,
-            });
+            })
+            .collect();
+        tracked.sort_by(display_order);
+        untracked.sort_by(display_order);
         View {
-            repos: tracked.chain(untracked).collect(),
+            repos: tracked.into_iter().chain(untracked).collect(),
             next_fetch: inner.next_fetch,
             last_fetch_duration: inner.last_fetch_duration,
             fetch_errors: inner.fetch_errors.clone(),
@@ -352,6 +360,15 @@ impl Inner {
             })
             .collect()
     }
+}
+
+/// Display order: by `<host>/<path>` compared case-insensitively, the exact
+/// string breaking ties. The scheme plays no part.
+fn display_order(a: &RepoView, b: &RepoView) -> std::cmp::Ordering {
+    let (a, b) = (a.id.host_and_path(), b.id.host_and_path());
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| a.cmp(b))
 }
 
 /// The tracked repos for a config's repo list: the first URL for each
