@@ -3,7 +3,7 @@
 mod common;
 
 use common::forge::{DMCA_MESSAGE, DMCA_NOTICE, Failure, FakeForge};
-use common::list_page::{ArchivePage, select, select_in, text};
+use common::list_page::{AppPage, select, select_in, text};
 use common::{HOUR, Page, TestApp, last_successes, three_repos, urls};
 use scraper::{ElementRef, Html};
 
@@ -137,7 +137,7 @@ async fn an_added_repo_is_cloned_right_away_and_shows_as_available() {
     assert_eq!(page.status, 200, "{}", page.text());
     assert_eq!(page.path, "/");
     assert_eq!(form_error(&page), None);
-    let landed = ArchivePage::parse(&page.text());
+    let landed = AppPage::parse(&page.text());
     assert_eq!(
         landed
             .tracked()

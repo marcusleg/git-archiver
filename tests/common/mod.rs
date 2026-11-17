@@ -302,15 +302,15 @@ impl TestApp {
     }
 
     /// The list page, parsed.
-    pub async fn list_page(&self) -> list_page::ArchivePage {
+    pub async fn list_page(&self) -> list_page::AppPage {
         self.page("/").await
     }
 
     /// The page at `path`, parsed, after checking it was found.
-    pub async fn page(&self, path: &str) -> list_page::ArchivePage {
+    pub async fn page(&self, path: &str) -> list_page::AppPage {
         let page = self.get(path).await;
         assert_eq!(page.status, 200, "GET {path}: {}", page.text());
-        list_page::ArchivePage::parse(&page.text())
+        list_page::AppPage::parse(&page.text())
     }
 
     /// Opens the untrack dialog on the card in the pane of the page at
@@ -369,7 +369,7 @@ impl TestApp {
     pub async fn add_repo(&self, url: &str) -> Page {
         let list = self.list_page().await;
         let action = list
-            .dialog_form("form:has(input[name=url])")
+            .post_form("dialog form:has(input[name=url])")
             .value()
             .attr("action")
             .expect("form has an action")

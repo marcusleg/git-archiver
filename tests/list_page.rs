@@ -2,7 +2,7 @@ mod common;
 
 use common::forge::{Failure, FakeForge};
 use common::git::refs;
-use common::list_page::{ArchivePage, select, text};
+use common::list_page::{AppPage, select, text};
 use common::{HOUR, MINUTE, TestApp};
 use scraper::{Html, Selector};
 
@@ -24,7 +24,7 @@ async fn the_list_page_shows_one_row_per_tracked_repo_and_the_first_ones_card() 
         page.content_type
     );
 
-    let list = ArchivePage::parse(&page.text());
+    let list = AppPage::parse(&page.text());
     assert_eq!(
         list.columns("Tracked repos"),
         ["Repo", "Status", "Last success", "Size"]
@@ -199,7 +199,7 @@ async fn repo_urls_are_escaped_in_the_row_its_title_and_the_card() {
 
     let body = app.get("/").await.text();
     assert!(!body.contains("<b>"), "{body}");
-    let list = ArchivePage::parse(&body);
+    let list = AppPage::parse(&body);
     let row = &list.tracked()[0];
     assert_eq!(row.repo, "example.com/a/%3Cb%3E", "the identity encodes it");
     assert_eq!(row.title, url);
@@ -509,9 +509,8 @@ async fn tracked_repos_show_sorted_by_identity_whatever_the_config_order() {
     ];
     let app = TestApp::tracking(&urls).await;
 
-    let html = app.get("/").await.text();
     assert_eq!(
-        ArchivePage::parse(&html).titles("Tracked repos"),
+        app.list_page().await.titles("Tracked repos"),
         [urls[2], urls[1], urls[0]]
     );
 }
@@ -527,9 +526,8 @@ async fn identities_sort_case_insensitively_and_the_exact_string_breaks_ties() {
     ];
     let app = TestApp::tracking(&urls).await;
 
-    let html = app.get("/").await.text();
     assert_eq!(
-        ArchivePage::parse(&html).titles("Tracked repos"),
+        app.list_page().await.titles("Tracked repos"),
         [urls[4], urls[2], urls[1], urls[3], urls[0]]
     );
 }
@@ -544,9 +542,8 @@ async fn the_scheme_plays_no_part_in_the_order() {
     ];
     let app = TestApp::tracking(&urls).await;
 
-    let html = app.get("/").await.text();
     assert_eq!(
-        ArchivePage::parse(&html).titles("Tracked repos"),
+        app.list_page().await.titles("Tracked repos"),
         [urls[2], urls[1], urls[0], urls[3]]
     );
 }
@@ -562,9 +559,8 @@ async fn untracked_archives_show_sorted_the_same_way() {
         std::fs::create_dir_all(app.archive(archive)).unwrap();
     }
 
-    let html = app.get("/").await.text();
     assert_eq!(
-        ArchivePage::parse(&html).titles("Untracked archives"),
+        app.list_page().await.titles("Untracked archives"),
         [
             "https://example.com/Alpha",
             "https://example.com/nixos/nixpkgs",
