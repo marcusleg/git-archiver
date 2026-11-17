@@ -1,81 +1,144 @@
 //! Runs the real binary, the way an operator starts it.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_git-archiver");
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn write_config(data_dir: &Path, port: u16) {
+fn write_config(data_dir: &Path) {
     std::fs::create_dir_all(data_dir).unwrap();
     std::fs::write(
         data_dir.join("config.toml"),
-        format!("listen = \"127.0.0.1:{port}\"\nrepos = [\"https://github.com/foo/bar\"]\n"),
+        "listen = \"127.0.0.1:0\"\nrepos = [\"https://github.com/foo/bar\"]\n",
     )
     .unwrap();
 }
 
-struct Running(Child);
+/// The real binary, with everything it writes captured as it goes.
+struct Running {
+    child: Child,
+    stdout: Arc<Mutex<String>>,
+    stderr: Arc<Mutex<String>>,
+}
 
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+impl Running {
+    /// Starts the binary with colours off and its output captured.
+    fn start(mut command: Command) -> Running {
+        let mut child = command
+            .env("NO_COLOR", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = capture(child.stdout.take().unwrap());
+        let stderr = capture(child.stderr.take().unwrap());
+        Running {
+            child,
+            stdout,
+            stderr,
+        }
+    }
+
+    /// What the app did so far: exit status and everything it wrote.
+    fn report(&mut self) -> String {
+        let status = match self.child.try_wait().unwrap() {
+            Some(status) => format!("exited with {status}"),
+            None => "still running".to_string(),
+        };
+        // Give the reader threads a moment to drain a just-exited app.
+        std::thread::sleep(Duration::from_millis(100));
+        format!(
+            "app {status}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout.lock().unwrap(),
+            self.stderr.lock().unwrap()
+        )
+    }
+
+    /// Waits for the app's startup log line and returns the address it bound.
+    fn addr(&mut self) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let found = self.stdout.lock().unwrap().lines().find_map(|line| {
+                let rest = line.split("listening addr=").nth(1)?;
+                Some(rest.split_whitespace().next()?.to_string())
+            });
+            if let Some(addr) = found {
+                return addr;
+            }
+            if self.child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                panic!("app never reported its address: {}", self.report());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Fetches the list page from the app, failing with what the app did.
+    fn list_page(&mut self) -> String {
+        let addr = self.addr();
+        match fetch(&addr) {
+            Ok(response) => response,
+            Err(error) => panic!(
+                "couldn't fetch the list page from {addr}: {error}\n{}",
+                self.report()
+            ),
+        }
     }
 }
 
-/// Waits for the app to answer on `port` and returns the list page.
-fn list_page(app: &mut Running, port: u16) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
-            stream
-                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .unwrap();
-            let mut response = String::new();
-            stream.read_to_string(&mut response).unwrap();
-            return response;
-        }
-        if let Some(status) = app.0.try_wait().unwrap() {
-            panic!("app exited with {status}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "app didn't listen on port {port}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
+}
+
+/// Collects a pipe on a background thread so the app never blocks writing.
+fn capture(mut pipe: impl Read + Send + 'static) -> Arc<Mutex<String>> {
+    let buffer = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&buffer);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = pipe.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            sink.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&chunk[..n]));
+        }
+    });
+    buffer
+}
+
+fn fetch(addr: &str) -> std::io::Result<String> {
+    let addr = addr.parse().unwrap();
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
 }
 
 #[test]
 fn the_data_directory_can_be_given_by_flag() {
     let dir = TempDir::new().unwrap();
-    let port = free_port();
-    write_config(dir.path(), port);
+    write_config(dir.path());
 
-    let mut app = Running(
-        Command::new(BINARY)
-            .arg("--data-dir")
-            .arg(dir.path())
-            .env_remove("GIT_ARCHIVER_DATA_DIR")
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut command = Command::new(BINARY);
+    command
+        .arg("--data-dir")
+        .arg(dir.path())
+        .env_remove("GIT_ARCHIVER_DATA_DIR");
+    let mut app = Running::start(command);
 
-    let page = list_page(&mut app, port);
+    let page = app.list_page();
     assert!(page.starts_with("HTTP/1.1 200"), "{page}");
     assert!(page.contains("https://github.com/foo/bar"), "{page}");
 }
@@ -83,18 +146,13 @@ fn the_data_directory_can_be_given_by_flag() {
 #[test]
 fn the_data_directory_can_be_given_by_environment_variable() {
     let dir = TempDir::new().unwrap();
-    let port = free_port();
-    write_config(dir.path(), port);
+    write_config(dir.path());
 
-    let mut app = Running(
-        Command::new(BINARY)
-            .env("GIT_ARCHIVER_DATA_DIR", dir.path())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut command = Command::new(BINARY);
+    command.env("GIT_ARCHIVER_DATA_DIR", dir.path());
+    let mut app = Running::start(command);
 
-    let page = list_page(&mut app, port);
+    let page = app.list_page();
     assert!(page.contains("https://github.com/foo/bar"), "{page}");
 }
 
@@ -105,21 +163,15 @@ fn a_missing_data_directory_is_created_with_a_default_config() {
 
     // The default config listens on port 8080, which may be taken; only the
     // written config matters here.
-    let mut app = Running(
-        Command::new(BINARY)
-            .arg("--data-dir")
-            .arg(&data_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut command = Command::new(BINARY);
+    command.arg("--data-dir").arg(&data_dir);
+    let app = Running::start(command);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !data_dir.join("config.toml").exists() {
         assert!(Instant::now() < deadline, "no config written");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = app.0.kill();
+    drop(app);
 
     let config = std::fs::read_to_string(data_dir.join("config.toml")).unwrap();
     assert!(config.contains("interval = \"24h\""), "{config}");
