@@ -12,7 +12,7 @@ Every tracked repo has one of three statuses:
 - **Unavailable**: upstream refused the repo with a 4xx response, such as a DMCA takedown or a deleted repo (except 408 and 429, which only ask to come back later). The archive is left untouched, and the repo keeps being fetched, so it becomes Available again if upstream restores it.
 - **Fetch failed**: a transient problem such as a 5xx response, a 408 or 429, a network error or a timeout. It says nothing about the repo's fate, never touches the archive, and is retried at the repo's next turn.
 
-A web UI lists every archive with its status, tip and preserved refs. You can add repos there or untrack them. Archives can be cloned read-only over HTTP, and `/metrics` exposes everything to Prometheus.
+A web UI lists every archive with its status, tip and preserved refs, and gives each repo its own page at `/repos/<host>/<path>`, such as `/repos/github.com/owner/repo`. You can add repos there or untrack them. Archives can be cloned read-only over HTTP, and `/metrics` exposes everything to Prometheus.
 
 The terms in bold are defined in [`CONTEXT.md`](CONTEXT.md).
 

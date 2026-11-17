@@ -40,12 +40,19 @@ async fn card(app: &TestApp, name: &str) -> String {
     list.pane_card().unwrap().html()
 }
 
-/// Opens the untrack dialog on the pane's card and clicks the button
-/// labelled `choice`, the way a browser submits it. Rows can't be selected
-/// yet and the pane shows the first tracked repo, so for any other repo the
-/// dialog's form is sent naming `url` instead.
+/// Opens the page of the tracked repo configured as `url`, opens the
+/// untrack dialog on its card and clicks the button labelled `choice`, the
+/// way a browser submits it.
 async fn untrack(app: &TestApp, url: &str, choice: &str) -> Page {
-    let list = app.list_page().await;
+    let row = app
+        .list_page()
+        .await
+        .tracked()
+        .into_iter()
+        .find(|row| row.title == url)
+        .unwrap_or_else(|| panic!("{url} isn't tracked"));
+    let list = app.page(&row.href).await;
+    assert_eq!(list.pane_title().as_deref(), Some(url), "the pane's repo");
     let card = list.pane_card().expect("the page has a pane");
     let form = select_in(&card, "dialog form")
         .into_iter()
@@ -57,13 +64,10 @@ async fn untrack(app: &TestApp, url: &str, choice: &str) -> Page {
         .iter()
         .map(|input| {
             let value = input.value();
-            let name = value.attr("name").unwrap().to_owned();
-            let value = if name == "repo" && list.pane_title().as_deref() != Some(url) {
-                url.to_owned()
-            } else {
-                value.attr("value").unwrap_or("").to_owned()
-            };
-            (name, value)
+            (
+                value.attr("name").unwrap().to_owned(),
+                value.attr("value").unwrap_or("").to_owned(),
+            )
         })
         .collect();
     let button = select_in(&form, "button")

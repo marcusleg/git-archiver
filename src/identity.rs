@@ -54,6 +54,22 @@ impl RepoId {
         })
     }
 
+    /// The identity named by `<host>[:<port>]/<path>`, as in a repo page's
+    /// URL, normalized as [`RepoId::from_url`] normalizes a URL.
+    pub fn from_host_and_path(raw: &str) -> anyhow::Result<Self> {
+        if raw.contains("://") {
+            bail!("{raw:?} is not a host and path");
+        }
+        // A URL drops its scheme's default port, but an identity keeps any
+        // port it names, so parse with a scheme whose default it isn't.
+        let authority = raw.split('/').next().unwrap_or_default();
+        let port = authority
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse::<u16>().ok());
+        let scheme = if port == Some(80) { "https" } else { "http" };
+        Self::from_url(&format!("{scheme}://{raw}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.id
     }
@@ -109,5 +125,18 @@ impl Ord for RepoId {
 impl fmt::Display for RepoId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RepoId;
+
+    #[test]
+    fn a_host_and_path_keeps_any_port_it_names() {
+        for port in ["80", "443", "8080"] {
+            let id = RepoId::from_host_and_path(&format!("example.com:{port}/a/b")).unwrap();
+            assert_eq!(id.host_and_path(), format!("example.com:{port}/a/b"));
+        }
     }
 }

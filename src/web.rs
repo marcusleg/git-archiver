@@ -55,6 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(list_page))
         .route("/repos", post(add_repo))
         .route("/repos/untrack", post(untrack_repo))
+        .route("/repos/{*identity}", get(repo_page))
         .route("/metrics", get(metrics))
         .route("/git/{*path}", any(git))
         .route("/assets/style.css", get(stylesheet))
@@ -200,20 +201,18 @@ async fn untrack_repo(
     let Ok(id) = RepoId::from_url(&form.repo) else {
         return (StatusCode::BAD_REQUEST, "Not a repo identity.").into_response();
     };
-    match try_untrack(&app, &id, form.archive).await {
-        Ok(()) => Redirect::to("/").into_response(),
-        Err(error) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            render_list(
-                &app,
-                &AddForm::default(),
-                Some(&error),
-                &endpoint_base(&headers, &uri),
-            )
-            .await,
-        )
-            .into_response(),
-    }
+    let error = match try_untrack(&app, &id, form.archive).await {
+        Ok(()) => return Redirect::to("/").into_response(),
+        Err(error) => error,
+    };
+    let base = endpoint_base(&headers, &uri);
+    let form = AddForm::default();
+    // The page for the repo, or the list if the repo is gone after all.
+    let page = match render_repo(&app, &form, Some(&error), &id, &base).await {
+        Some(page) => page,
+        None => render_list(&app, &form, Some(&error), &base).await,
+    };
+    (StatusCode::UNPROCESSABLE_ENTITY, page).into_response()
 }
 
 /// Untracks the repo through `Tracking`. On failure, says why for the page.
@@ -245,6 +244,50 @@ async fn list_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
     .await
 }
 
+/// Where a repo's page lives: `/repos/<host>[:<port>]/<path>`.
+fn repo_page_path(id: &RepoId) -> String {
+    format!("/repos/{}", id.host_and_path())
+}
+
+/// A repo's page: the list with that repo selected. Another spelling of the
+/// same identity redirects to the canonical one, so each repo has one URL.
+async fn repo_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Response {
+    // The path as sent, still percent-encoded like an identity's path.
+    let requested = uri.path().strip_prefix("/repos/").unwrap_or_default();
+    let Ok(id) = RepoId::from_host_and_path(requested) else {
+        return not_found();
+    };
+    if id.host_and_path() != requested {
+        return Redirect::permanent(&repo_page_path(&id)).into_response();
+    }
+    let base = endpoint_base(&headers, &uri);
+    match render_repo(&app, &AddForm::default(), None, &id, &base).await {
+        Some(page) => page.into_response(),
+        None => not_found(),
+    }
+}
+
+/// The page for a path that names no repo the app knows.
+fn not_found() -> Response {
+    let page = layout(
+        "Repo not found · Git Archiver",
+        html! {
+            section .card.empty {
+                (icon_archive())
+                h2 { "Repo not found" }
+                p { "No tracked repo or archive has this address." }
+                a href="/" { (back_to_list()) }
+            }
+        },
+    );
+    (StatusCode::NOT_FOUND, Html(page.into_string())).into_response()
+}
+
+/// The text of the link back to the list.
+fn back_to_list() -> Markup {
+    html! { span aria-hidden="true" { "← " } "All repos" }
+}
+
 /// A card's contents: one archive, tracked or not.
 struct CardView {
     /// The URL as configured for a tracked repo, the identity otherwise.
@@ -273,93 +316,135 @@ async fn card_view(app: &AppState, repo: &RepoView) -> CardView {
     }
 }
 
-/// The list page. `problem` says why the last action failed.
+/// The list page, with the first tracked repo's card in the pane. `problem`
+/// says why the last action failed.
 async fn render_list(
     app: &AppState,
     form: &AddForm,
     problem: Option<&str>,
     base: &str,
 ) -> Html<String> {
+    render_page(app, form, problem, None, base)
+        .await
+        .expect("the list page needs no particular repo")
+}
+
+/// The page of the repo `id`, or `None` if the app knows no such repo.
+async fn render_repo(
+    app: &AppState,
+    form: &AddForm,
+    problem: Option<&str>,
+    id: &RepoId,
+    base: &str,
+) -> Option<Html<String>> {
+    render_page(app, form, problem, Some(id), base).await
+}
+
+/// The list, with `repo`'s card in the pane on its own page or the first
+/// tracked repo's on the list page. `problem` says why the last action
+/// failed. `None` if the app knows no such repo.
+async fn render_page(
+    app: &AppState,
+    form: &AddForm,
+    problem: Option<&str>,
+    repo: Option<&RepoId>,
+    base: &str,
+) -> Option<Html<String>> {
     let on_disk = app.archives.list().await;
     let view = app.overview.view(&on_disk);
     let config_error = view.config_error;
-    let (tracked, untracked): (Vec<_>, Vec<_>) = view.repos.into_iter().partition(|r| r.tracked);
-    // The pane shows the first tracked repo; untracked archives get no
-    // pane of their own until rows can be selected.
-    let selected = match tracked.first() {
-        Some(first) => Some(card_view(app, first).await),
+    let selected = match repo {
+        Some(id) => Some(view.repos.iter().find(|r| &r.id == id)?),
+        None => view.repos.iter().find(|r| r.tracked),
+    };
+    let selected = match selected {
+        Some(repo) => Some(card_view(app, repo).await),
         None => None,
     };
     let selected_id = selected.as_ref().map(|card| &card.id);
+    let (tracked, untracked): (Vec<_>, Vec<_>) = view.repos.into_iter().partition(|r| r.tracked);
     let now = app.clock.now();
+    let (title, page_class) = match repo {
+        Some(id) => (
+            format!("{} · Git Archiver", id.host_and_path()),
+            "repo-page",
+        ),
+        None => ("Git Archiver".to_owned(), "list-page"),
+    };
 
-    Html(
-        layout(html! {
-            @if let Some(problem) = problem {
-                div .card.banner role="alert" {
-                    (icon_circle_alert())
-                    p { (problem) }
-                }
-            }
-            @if let Some(error) = &config_error {
-                div .card.banner role="status" {
-                    (icon_circle_alert())
-                    div {
-                        p {
-                            code { (app.config_path.display()) }
-                            " is invalid, so the app keeps using the last good config. \
-                             Fix the file and the app picks it up within a minute."
-                        }
-                        pre .reason { (error) }
+    Some(Html(
+        layout(
+            &title,
+            html! {
+                @if let Some(problem) = problem {
+                    div .card.banner role="alert" {
+                        (icon_circle_alert())
+                        p { (problem) }
                     }
                 }
-            }
-            div .columns {
-                div .list {
-                    @if tracked.is_empty() {
-                        section .card.empty {
-                            (icon_archive())
-                            h2 { "No repos tracked yet" }
+                @if let Some(error) = &config_error {
+                    div .card.banner role="status" {
+                        (icon_circle_alert())
+                        div {
                             p {
-                                "Add one here, or list repo URLs under " code { "repos" } " in "
                                 code { (app.config_path.display()) }
-                                ". The app picks up changes to the file within a minute."
+                                " is invalid, so the app keeps using the last good config. \
+                                 Fix the file and the app picks it up within a minute."
                             }
-                            (add_button())
+                            pre .reason { (error) }
                         }
-                    } @else {
-                        section aria-labelledby="tracked-heading" {
-                            div .section-head {
-                                h2 #tracked-heading .section-label {
-                                    "Tracked repos " span .count { (tracked.len()) }
+                    }
+                }
+                div .columns.(page_class) {
+                    div .list {
+                        @if tracked.is_empty() {
+                            section .card.empty {
+                                (icon_archive())
+                                h2 { "No repos tracked yet" }
+                                p {
+                                    "Add one here, or list repo URLs under " code { "repos" } " in "
+                                    code { (app.config_path.display()) }
+                                    ". The app picks up changes to the file within a minute."
                                 }
                                 (add_button())
                             }
-                            (repo_table(&tracked, selected_id, now))
+                        } @else {
+                            section aria-labelledby="tracked-heading" {
+                                div .section-head {
+                                    h2 #tracked-heading .section-label {
+                                        "Tracked repos " span .count { (tracked.len()) }
+                                    }
+                                    (add_button())
+                                }
+                                (repo_table(&tracked, selected_id, now))
+                            }
+                        }
+                        @if !untracked.is_empty() {
+                            section aria-labelledby="untracked-heading" {
+                                h2 #untracked-heading .section-label {
+                                    "Untracked archives " span .count { (untracked.len()) }
+                                }
+                                p .section-note {
+                                    "No longer fetched. Add a repo again to continue its archive."
+                                }
+                                (repo_table(&untracked, selected_id, now))
+                            }
                         }
                     }
-                    @if !untracked.is_empty() {
-                        section aria-labelledby="untracked-heading" {
-                            h2 #untracked-heading .section-label {
-                                "Untracked archives " span .count { (untracked.len()) }
+                    @if let Some(card) = &selected {
+                        aside .pane aria-label="Selected repo" {
+                            @if repo.is_some() {
+                                a .back href="/" { (back_to_list()) }
                             }
-                            p .section-note {
-                                "No longer fetched. Add a repo again to continue its archive."
-                            }
-                            (repo_table(&untracked, None, now))
+                            (repo_card(card, base, now))
                         }
                     }
                 }
-                @if let Some(card) = &selected {
-                    aside .pane aria-label="Selected repo" {
-                        (repo_card(card, base, now))
-                    }
-                }
-            }
-            (add_dialog(form))
-        })
+                (add_dialog(form))
+            },
+        )
         .into_string(),
-    )
+    ))
 }
 
 /// A table of repos, one row each, marking the row of the repo the pane
@@ -372,8 +457,8 @@ fn repo_table(repos: &[RepoView], selected: Option<&RepoId>, now: SystemTime) ->
                     tr {
                         th scope="col" { "Repo" }
                         th scope="col" { "Status" }
-                        th scope="col" { "Last success" }
-                        th .num scope="col" { "Size" }
+                        th .col-success scope="col" { "Last success" }
+                        th .col-size.num scope="col" { "Size" }
                     }
                 }
                 tbody {
@@ -386,19 +471,24 @@ fn repo_table(repos: &[RepoView], selected: Option<&RepoId>, now: SystemTime) ->
     }
 }
 
-/// A repo's row: its identity with the configured URL on hover, its
-/// status, last success and size. `selected` marks the pane's repo.
+/// A repo's row: its identity, linking to the repo's page, with the
+/// configured URL on hover, its status, last success and size. `selected`
+/// marks the pane's repo. The link covers the whole row, so a click anywhere
+/// on it selects the repo.
 fn repo_row(repo: &RepoView, selected: bool, now: SystemTime) -> Markup {
     let state = repo.state.clone().unwrap_or_default();
+    let current = selected.then_some("true");
     html! {
-        tr aria-current=[selected.then_some("true")] {
+        tr aria-current=[current] {
             td .repo title=(repo.title) {
-                span .host { (repo.id.host()) "/" }
-                strong { (repo.id.path()) }
+                a .row-link href=(repo_page_path(&repo.id)) aria-current=[current] {
+                    span .host { (repo.id.host()) "/" }
+                    strong { (repo.id.path()) }
+                }
             }
             td { (status_label(&state)) }
-            td { (time_or_never(state.last_success, now)) }
-            td .num {
+            td .col-success { (time_or_never(state.last_success, now)) }
+            td .col-size.num {
                 (size_or_dash(state.size_bytes))
             }
         }
@@ -409,22 +499,22 @@ fn repo_row(repo: &RepoView, selected: bool, now: SystemTime) -> Markup {
 fn status_label(state: &RepoState) -> Markup {
     match state.status {
         Some(Status::Available) => html! {
-            span .status.available { (icon_circle_check()) span { "Available" } }
+            span .status.available { (icon_circle_check()) span .label { "Available" } }
         },
         Some(Status::Unavailable) => html! {
             span .status.unavailable {
                 (icon_ban())
-                span {
+                span .label {
                     "Unavailable"
                     @if let Some(http_status) = state.http_status { " · " (http_status) }
                 }
             }
         },
         Some(Status::FetchFailed) => html! {
-            span .status.fetch-failed { (icon_refresh_cw_off()) span { "Fetch failed" } }
+            span .status.fetch-failed { (icon_refresh_cw_off()) span .label { "Fetch failed" } }
         },
         None => html! {
-            span .status { (icon_clock()) span { "Not fetched yet" } }
+            span .status { (icon_clock()) span .label { "Not fetched yet" } }
         },
     }
 }
@@ -851,7 +941,8 @@ fn format_size(bytes: u64) -> String {
     format!("{value:.1} {unit}")
 }
 
-fn layout(content: Markup) -> Markup {
+/// A page of the app titled `title`, around `content`.
+fn layout(title: &str, content: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -859,7 +950,7 @@ fn layout(content: Markup) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="color-scheme" content="dark";
-                title { "Git Archiver" }
+                title { (title) }
                 // No product mark: an empty icon stops the browser asking for /favicon.ico.
                 link rel="icon" href="data:,";
                 link rel="stylesheet" href="/assets/style.css";
