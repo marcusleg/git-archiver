@@ -29,6 +29,8 @@ pub struct TestApp {
     dir: TempDir,
     clock: Arc<ManualClock>,
     app: Option<RunningApp>,
+    /// Where the app last listened, for [`TestApp::start_again`].
+    listen: SocketAddr,
 }
 
 pub struct Page {
@@ -117,6 +119,7 @@ impl TestApp {
             dir: TempDir::new().unwrap(),
             clock: ManualClock::new(),
             app: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
         }
     }
 
@@ -126,15 +129,25 @@ impl TestApp {
     }
 
     async fn boot(&mut self) -> anyhow::Result<()> {
-        self.app = Some(git_archiver::start(self.options()).await?);
+        self.boot_listening("127.0.0.1:0".parse().unwrap()).await
+    }
+
+    async fn boot_listening(&mut self, listen: SocketAddr) -> anyhow::Result<()> {
+        let app = git_archiver::start(self.options_listening(listen)).await?;
+        self.listen = app.addr();
+        self.app = Some(app);
         Ok(())
     }
 
     /// Binds to a random local port, overriding the config's `listen`.
     fn options(&self) -> Options {
+        self.options_listening("127.0.0.1:0".parse().unwrap())
+    }
+
+    fn options_listening(&self, listen: SocketAddr) -> Options {
         Options {
             data_dir: self.dir.path().to_owned(),
-            listen: Some("127.0.0.1:0".parse().unwrap()),
+            listen: Some(listen),
             clock: self.clock.clone(),
         }
     }
@@ -152,9 +165,10 @@ impl TestApp {
         }
     }
 
-    /// Starts a stopped app again against the same data directory.
+    /// Starts a stopped app again against the same data directory, on the
+    /// address it had, so pages and clients that were talking to it find it.
     pub async fn start_again(&mut self) {
-        self.boot().await.expect("app restarts");
+        self.boot_listening(self.listen).await.expect("app restarts");
     }
 
     pub fn data_dir(&self) -> &Path {

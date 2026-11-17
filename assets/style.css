@@ -129,6 +129,16 @@ code {
   border-bottom: 1px solid var(--border);
 }
 
+.live-note {
+  margin-inline-start: auto;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.live-note[hidden] {
+  display: none;
+}
+
 .brand {
   position: relative;
   padding-block: 0.3em;

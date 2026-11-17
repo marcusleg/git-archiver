@@ -7,7 +7,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use common::browser::{Browser, Viewport, find_browser_in};
 use common::forge::{Failure, FakeForge};
-use common::{HOUR, MINUTE, TestApp};
+use common::{HOUR, MINUTE, TestApp, config_tracking};
 
 /// Opening the untrack dialog on a repo's page and cancelling it leaves the
 /// repo tracked.
@@ -337,6 +337,30 @@ async fn a_fetch_updates_the_row_on_the_list_page() {
     app.advance_and_settle(24 * HOUR).await;
 
     tab.sees("Unavailable · 403").await;
+    tab.still_shows_the_marked_document().await;
+}
+
+#[tokio::test]
+async fn a_dropped_event_stream_shows_a_note_and_reconnecting_refreshes_once() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    let mut app = TestApp::tracking(&[upstream.url()]).await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+    tab.doesnt_see("Live updates paused").await;
+    tab.mark_document().await;
+
+    app.stop().await;
+    tab.sees("Live updates paused").await;
+
+    // The page can only learn of what changed while it was away by
+    // refetching on reconnect.
+    let second = forge.create_repo("a/two");
+    app.write_config(&config_tracking(&[upstream.url(), second.url()]));
+    app.start_again().await;
+    tab.sees("a/two").await;
+    tab.stops_seeing("Live updates paused").await;
     tab.still_shows_the_marked_document().await;
 }
 
