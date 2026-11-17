@@ -92,6 +92,94 @@ async fn relative_times_count_up_while_the_page_is_open() {
     }
 }
 
+/// The add dialog's line, seen only while it's open.
+const CLONES_RIGHT_AWAY: &str = "The app clones it right away";
+
+/// Adding a repo through the dialog: a failed add reopens it with the URL
+/// and the error, Cancel closes it, and a good URL lands on the list.
+async fn adding_a_repo_through_the_dialog(viewport: Viewport) {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("a/one");
+    upstream.commit("first");
+    let app = TestApp::start().await;
+    let browser = Browser::launch(viewport).await;
+    let tab = browser.open(&format!("http://{}/", app.addr())).await;
+
+    tab.sees("No repos tracked yet").await;
+    tab.doesnt_see(CLONES_RIGHT_AWAY).await;
+    tab.click_button("Add repo").await;
+    tab.sees(CLONES_RIGHT_AWAY).await;
+    tab.sees_a_modal_dialog().await;
+
+    // A URL the browser accepts but the app doesn't.
+    let ftp = "ftp://example.com/foo/bar";
+    tab.fill("Repo URL", ftp).await;
+    tab.click_button("Add repo").await;
+    tab.sees("must be an http:// or https:// URL").await;
+    assert_eq!(tab.value_of("Repo URL").await, ftp);
+    tab.sees_a_modal_dialog().await;
+
+    tab.click_button("Cancel").await;
+    tab.stops_seeing(CLONES_RIGHT_AWAY).await;
+    tab.doesnt_see("must be an http:// or https:// URL").await;
+
+    tab.click_button("Add repo").await;
+    tab.fill("Repo URL", upstream.url()).await;
+    tab.click_button("Add repo").await;
+    tab.stops_seeing("No repos tracked yet").await;
+    tab.sees("a/one").await;
+    tab.doesnt_see(CLONES_RIGHT_AWAY).await;
+    assert_eq!(tab.path().await, "/");
+    assert!(app.config().contains(upstream.url()));
+
+    // Now the button sits beside the "Tracked repos" heading.
+    tab.click_button("Add repo").await;
+    tab.sees(CLONES_RIGHT_AWAY).await;
+    tab.click_button("Cancel").await;
+    tab.stops_seeing(CLONES_RIGHT_AWAY).await;
+}
+
+#[tokio::test]
+async fn adding_a_repo_through_the_dialog_on_desktop() {
+    adding_a_repo_through_the_dialog(Viewport::Desktop).await;
+}
+
+#[tokio::test]
+async fn adding_a_repo_through_the_dialog_on_a_phone() {
+    adding_a_repo_through_the_dialog(Viewport::Phone).await;
+}
+
+#[tokio::test]
+async fn without_javascript_the_add_dialog_opens_and_its_form_submits() {
+    let forge = FakeForge::start().await;
+    let first = forge.create_repo("a/one");
+    first.commit("first");
+    let second = forge.create_repo("a/two");
+    second.commit("first");
+    let app = TestApp::tracking(&[first.url()]).await;
+    let browser = Browser::launch(Viewport::Desktop).await;
+    let tab = browser
+        .open_without_javascript(&format!("http://{}/", app.addr()))
+        .await;
+
+    tab.doesnt_see(CLONES_RIGHT_AWAY).await;
+    tab.click_button("Add repo").await;
+    tab.sees(CLONES_RIGHT_AWAY).await;
+
+    let ftp = "ftp://example.com/foo/bar";
+    tab.fill("Repo URL", ftp).await;
+    tab.click_dialog_button("Add repo").await;
+    tab.sees("must be an http:// or https:// URL").await;
+    assert_eq!(tab.value_of("Repo URL").await, ftp);
+
+    tab.fill("Repo URL", second.url()).await;
+    tab.click_dialog_button("Add repo").await;
+    tab.sees("a/two").await;
+    tab.doesnt_see(CLONES_RIGHT_AWAY).await;
+    assert_eq!(tab.path().await, "/");
+    assert!(app.config().contains(second.url()));
+}
+
 #[test]
 fn a_missing_browser_is_an_error_naming_the_variable_to_set() {
     let empty = Some(std::ffi::OsString::from("/nonexistent"));

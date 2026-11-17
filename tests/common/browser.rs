@@ -13,7 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chromiumoxide::browser::{Browser as Chromium, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::emulation::{
-    EventVirtualTimeBudgetExpired, SetVirtualTimePolicyParams, VirtualTimePolicy,
+    EventVirtualTimeBudgetExpired, SetScriptExecutionDisabledParams, SetVirtualTimePolicyParams,
+    VirtualTimePolicy,
 };
 use chromiumoxide::cdp::browser_protocol::network::TimeSinceEpoch;
 use chromiumoxide::element::Element;
@@ -188,6 +189,37 @@ impl Browser {
 
     async fn loaded(&self, page: Page) -> Tab {
         page.wait_for_navigation().await.expect("the page loads");
+        self.tab(page).await
+    }
+
+    /// Opens `url` in a new tab that runs no JavaScript, as for a person who
+    /// turned it off, and waits for it to load.
+    pub async fn open_without_javascript(&self, url: &str) -> Tab {
+        let page = self
+            .browser
+            .new_page("about:blank")
+            .await
+            .expect("the page opens");
+        page.execute(SetScriptExecutionDisabledParams::new(true))
+            .await
+            .expect("JavaScript turns off");
+        // Check it took: a page whose only script marks the document.
+        page.goto("data:text/html,<script>document.documentElement.dataset.ran = 1</script>")
+            .await
+            .expect("the check page opens");
+        let ran: bool = page
+            .evaluate("'ran' in document.documentElement.dataset")
+            .await
+            .expect("script check")
+            .into_value()
+            .expect("script check is a bool");
+        assert!(!ran, "a script ran with JavaScript off");
+        page.goto(url).await.expect("the page opens");
+        page.wait_for_navigation().await.expect("the page loads");
+        self.tab(page).await
+    }
+
+    async fn tab(&self, page: Page) -> Tab {
         let width: u32 = page
             .evaluate("window.innerWidth")
             .await
@@ -221,17 +253,25 @@ impl Tab {
     /// dialog, say) are left out. Matching on it ignores case, as a reader
     /// does, so CSS that upper-cases a label doesn't change what's seen.
     pub async fn visible_text(&self) -> String {
+        self.try_visible_text()
+            .await
+            .expect("page text, with no navigation under way")
+    }
+
+    /// The visible text, or `None` while a navigation replaces the page.
+    async fn try_visible_text(&self) -> Option<String> {
         self.page
             .evaluate("document.body.innerText")
             .await
-            .expect("page text")
+            .ok()?
             .into_value()
-            .expect("page text is a string")
+            .ok()
     }
 
     async fn shows(&self, text: &str) -> bool {
-        let shown = self.visible_text().await.to_lowercase();
-        shown.contains(&text.to_lowercase())
+        self.try_visible_text()
+            .await
+            .is_some_and(|shown| shown.to_lowercase().contains(&text.to_lowercase()))
     }
 
     /// Waits until `text` can be read on the page.
@@ -260,19 +300,55 @@ impl Tab {
     }
 
     /// Clicks the visible button labelled `label`, with a real mouse click.
+    /// While a modal dialog is open, only its buttons count: the rest of the
+    /// page can't be clicked.
     pub async fn click_button(&self, label: &str) {
-        let button = self
-            .wait_until(&format!("a visible button {label:?}"), || {
-                self.visible_button(label)
-            })
-            .await;
-        button.click().await.expect("click");
+        self.click("button", label).await;
     }
 
-    async fn visible_button(&self, label: &str) -> Option<Element> {
-        for button in self.page.find_elements("button").await.unwrap_or_default() {
+    /// Clicks the visible button labelled `label` in the open dialog, modal
+    /// or not.
+    pub async fn click_dialog_button(&self, label: &str) {
+        self.click("dialog[open] button", label).await;
+    }
+
+    async fn click(&self, selector: &str, label: &str) {
+        let button = self
+            .wait_until(
+                &format!("a visible {selector:?} labelled {label:?}"),
+                || self.visible_button(selector, label),
+            )
+            .await;
+        self.click_on(&button).await;
+    }
+
+    /// Clicks the middle of `element` with the mouse, scrolling it into view
+    /// first. Unlike `Element::click`, this works with JavaScript off: that
+    /// waits on an `IntersectionObserver`, whose callback never runs then.
+    async fn click_on(&self, element: &Element) {
+        element
+            .call_js_fn(
+                "function() {
+                    this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                }",
+                false,
+            )
+            .await
+            .expect("scroll into view");
+        let point = element.clickable_point().await.expect("a point to click");
+        self.page.click(point).await.expect("click");
+    }
+
+    async fn visible_button(&self, selector: &str, label: &str) -> Option<Element> {
+        for button in self.page.find_elements(selector).await.unwrap_or_default() {
             let shown = button
-                .call_js_fn("function() { return this.checkVisibility() }", false)
+                .call_js_fn(
+                    "function() {
+                        const modal = document.querySelector('dialog:modal');
+                        return this.checkVisibility() && (!modal || modal.contains(this));
+                    }",
+                    false,
+                )
                 .await
                 .ok()
                 .and_then(|r| r.result.value)
@@ -326,6 +402,80 @@ impl Tab {
             .await
             .unwrap_or_else(|_| panic!("the page's clock didn't move {by:?} in time"))
             .expect("the browser is still there");
+    }
+
+    /// Waits until a modal dialog is open, so the rest of the page can't be
+    /// used until it closes.
+    pub async fn sees_a_modal_dialog(&self) {
+        self.wait_until("a modal dialog", || async {
+            let open: bool = self
+                .page
+                .evaluate("document.querySelector('dialog:modal') !== null")
+                .await
+                .ok()?
+                .into_value()
+                .ok()?;
+            open.then_some(())
+        })
+        .await;
+    }
+
+    /// Replaces what's in the visible field labelled `label` with `text`,
+    /// typed key by key.
+    pub async fn fill(&self, label: &str, text: &str) {
+        let field = self.field(label).await;
+        self.click_on(&field).await;
+        field
+            .call_js_fn("function() { this.select() }", false)
+            .await
+            .expect("select the field's text");
+        field.type_str(text).await.expect("type");
+    }
+
+    /// What the visible field labelled `label` holds.
+    pub async fn value_of(&self, label: &str) -> String {
+        self.field(label)
+            .await
+            .property("value")
+            .await
+            .expect("the field's value")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .expect("the field's value is a string")
+    }
+
+    /// The visible field whose label reads `label`.
+    async fn field(&self, label: &str) -> Element {
+        let is_it = format!(
+            "function() {{
+                return this.checkVisibility()
+                    && [...this.labels].some(l => l.innerText.trim() === {});
+            }}",
+            serde_json::to_string(label).unwrap()
+        );
+        self.wait_until(&format!("a visible field labelled {label:?}"), || async {
+            for field in self.page.find_elements("input").await.unwrap_or_default() {
+                let labelled = field
+                    .call_js_fn(is_it.clone(), false)
+                    .await
+                    .ok()
+                    .and_then(|r| r.result.value)
+                    == Some(true.into());
+                if labelled {
+                    return Some(field);
+                }
+            }
+            None
+        })
+        .await
+    }
+
+    /// The path of the page shown now, such as `/`.
+    pub async fn path(&self) -> String {
+        let url = self.page.url().await.expect("page url").expect("a url");
+        url::Url::parse(&url)
+            .expect("a valid url")
+            .path()
+            .to_owned()
     }
 
     /// Reloads the page.
