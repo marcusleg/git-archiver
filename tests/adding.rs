@@ -3,22 +3,60 @@
 mod common;
 
 use common::forge::{DMCA_MESSAGE, DMCA_NOTICE, Failure, FakeForge};
-use common::list_page::{select, text};
+use common::list_page::{ListPage, select, select_in, text};
 use common::{HOUR, Page, TestApp, last_successes, three_repos, urls};
-use scraper::Html;
+use scraper::{ElementRef, Html};
 
-/// The add form's error message, if it shows one.
+/// The add form's error message, if it shows one. Only an open dialog's
+/// error counts: a closed one isn't seen.
 fn form_error(page: &Page) -> Option<String> {
     let html = Html::parse_document(&page.text());
-    select(&html, "form [role=alert]").first().map(text)
+    select(&html, "dialog[open] form [role=alert]")
+        .first()
+        .map(text)
 }
 
-/// The URL in the add form's field.
+/// The URL in the add form's field, if its dialog is open.
 fn form_value(page: &Page) -> Option<String> {
     let html = Html::parse_document(&page.text());
-    select(&html, "form input[name=url]")
+    select(&html, "dialog[open] form input[name=url]")
         .first()
         .and_then(|input| input.value().attr("value").map(str::to_owned))
+}
+
+/// The add dialog: the dialog holding the form that posts a repo URL.
+fn add_dialog(html: &Html) -> ElementRef<'_> {
+    let dialogs = select(html, "dialog:has(form input[name=url])");
+    assert_eq!(dialogs.len(), 1, "the page has one add dialog");
+    dialogs[0]
+}
+
+/// The "+ Add repo" buttons in `scope`, outside the dialog, each checked to
+/// open the add dialog.
+fn add_buttons<'a>(html: &Html, scope: &ElementRef<'a>) -> Vec<ElementRef<'a>> {
+    let dialog = add_dialog(html)
+        .value()
+        .attr("id")
+        .expect("the dialog has an id")
+        .to_owned();
+    let in_dialog = |button: &ElementRef| {
+        button.ancestors().any(|node| {
+            node.value()
+                .as_element()
+                .is_some_and(|e| e.name() == "dialog")
+        })
+    };
+    let buttons: Vec<_> = select_in(scope, "button")
+        .into_iter()
+        .filter(|button| text(button) == "Add repo" && !in_dialog(button))
+        .collect();
+    for button in &buttons {
+        assert_eq!(button.value().attr("type"), Some("button"));
+        assert_eq!(button.value().attr("commandfor"), Some(dialog.as_str()));
+        assert_eq!(button.value().attr("command"), Some("show-modal"));
+        assert_eq!(button.value().attr("aria-haspopup"), Some("dialog"));
+    }
+    buttons
 }
 
 /// Each tracked repo's row: its configured URL and status, in page order.
@@ -32,18 +70,57 @@ async fn rows(app: &TestApp) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn the_list_page_has_an_add_form_whether_or_not_repos_are_tracked() {
+async fn the_heading_and_the_empty_state_each_have_an_add_button_opening_the_dialog() {
+    let app = TestApp::start().await;
+    let html = Html::parse_document(&app.get("/").await.text());
+    let empty = select(&html, "main .card.empty")[0];
+    assert_eq!(add_buttons(&html, &empty).len(), 1, "in the empty state");
+    assert_eq!(add_buttons(&html, &select(&html, "main")[0]).len(), 1);
+
+    let app = TestApp::tracking(&["https://github.com/foo/bar"]).await;
+    let html = Html::parse_document(&app.get("/").await.text());
+    let heading = select(&html, "main section .section-head:has(#tracked-heading)")[0];
+    assert_eq!(add_buttons(&html, &heading).len(), 1, "beside the heading");
+    assert_eq!(add_buttons(&html, &select(&html, "main")[0]).len(), 1);
+}
+
+#[tokio::test]
+async fn the_add_dialog_is_closed_and_holds_the_form() {
     for app in [
         TestApp::start().await,
         TestApp::tracking(&["https://github.com/foo/bar"]).await,
     ] {
         let page = app.get("/").await;
         let html = Html::parse_document(&page.text());
-        let input = &select(&html, "main form input[name=url]")[0];
+        let dialog = add_dialog(&html);
+        assert_eq!(dialog.value().attr("open"), None, "closed until asked for");
+
+        let heading = &select_in(&dialog, "h2")[0];
+        assert_eq!(text(heading), "Add a repo");
+        assert_eq!(
+            dialog.value().attr("aria-labelledby"),
+            heading.value().attr("id")
+        );
+        assert_eq!(
+            select_in(&dialog, "p").iter().map(text).collect::<Vec<_>>(),
+            ["The app clones it right away, then fetches it once per interval."]
+        );
+        let form = &select_in(&dialog, "form")[0];
+        assert_eq!(form.value().attr("method"), Some("post"));
+        assert_eq!(form.value().attr("action"), Some("/repos"));
+        let input = &select_in(form, "input[name=url]")[0];
         let id = input.value().attr("id").unwrap();
-        let label = &select(&html, &format!("label[for={id}]"))[0];
-        assert_eq!(text(label), "Repo URL");
-        assert_eq!(text(&select(&html, "main form button")[0]), "Add repo");
+        assert_eq!(
+            text(&select(&html, &format!("label[for={id}]"))[0]),
+            "Repo URL"
+        );
+        assert_eq!(
+            select_in(form, "button")
+                .iter()
+                .map(text)
+                .collect::<Vec<_>>(),
+            ["Cancel", "Add repo"]
+        );
         assert_eq!(form_error(&page), None);
     }
 }
@@ -58,7 +135,18 @@ async fn an_added_repo_is_cloned_right_away_and_shows_as_available() {
 
     let page = app.add_repo(upstream.url()).await;
     assert_eq!(page.status, 200, "{}", page.text());
+    assert_eq!(page.path, "/");
     assert_eq!(form_error(&page), None);
+    let landed = ListPage::parse(&page.text());
+    assert_eq!(
+        landed
+            .tracked()
+            .into_iter()
+            .map(|row| row.title)
+            .collect::<Vec<_>>(),
+        [upstream.url()],
+        "lands on the list with the new repo in it"
+    );
     app.settle().await;
 
     assert_eq!(app.now(), start, "the clock didn't move");

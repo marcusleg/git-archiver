@@ -435,28 +435,21 @@ main {
   color: var(--fg);
 }
 
-/* Add form: label above the field, the button beside it until space runs out */
+/* Add dialog: label above the field, the reason for a failed add under it */
 
-.add-repo form {
+.add-form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
 }
 
-.add-repo label {
+.add-form label {
+  margin-top: var(--space-4);
   font-size: 0.875rem;
   font-weight: 700;
 }
 
-.add-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-3);
-}
-
-.add-row input {
-  flex: 1 1 16rem;
-  min-width: 0;
+.add-form input {
+  margin-top: var(--space-2);
   padding: var(--space-2) var(--space-3);
   font: inherit;
   color: var(--fg);
@@ -466,17 +459,53 @@ main {
   transition: border-color 200ms;
 }
 
-.add-row input::placeholder {
+.add-form input::placeholder {
   color: var(--muted);
 }
 
-.add-row input:focus-visible {
+.add-form input:focus-visible {
   outline: none;
   border-color: var(--primary);
 }
 
-.add-row input[aria-invalid="true"] {
+.add-form input[aria-invalid="true"] {
   border-color: var(--accent-orange);
+}
+
+.dialog .form-error {
+  margin-top: var(--space-3);
+  color: var(--fg);
+}
+
+/* "+ Add repo": at the right end of the "Tracked repos" heading, and in the
+   empty state */
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.section-head .section-label {
+  margin: 0;
+}
+
+.add-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.empty .add-button {
+  margin-top: var(--space-2);
+}
+
+.empty .add-button .icon {
+  width: 1em;
+  height: 1em;
+  color: inherit;
 }
 
 .button {
@@ -519,7 +548,7 @@ main {
   font-size: 0.875rem;
 }
 
-/* Untrack confirmation: on `surface` with a border over the `overlay`
+/* Dialogs: on `surface` with a border over the `overlay`
    backdrop, no shadow */
 
 .dialog {

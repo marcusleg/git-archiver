@@ -316,21 +316,24 @@ async fn render_list(
             }
             div .columns {
                 div .list {
-                    (add_form(form))
                     @if tracked.is_empty() {
                         section .card.empty {
                             (icon_archive())
                             h2 { "No repos tracked yet" }
                             p {
-                                "Add one above, or list repo URLs under " code { "repos" } " in "
+                                "Add one here, or list repo URLs under " code { "repos" } " in "
                                 code { (app.config_path.display()) }
                                 ". The app picks up changes to the file within a minute."
                             }
+                            (add_button())
                         }
                     } @else {
                         section aria-labelledby="tracked-heading" {
-                            h2 #tracked-heading .section-label {
-                                "Tracked repos " span .count { (tracked.len()) }
+                            div .section-head {
+                                h2 #tracked-heading .section-label {
+                                    "Tracked repos " span .count { (tracked.len()) }
+                                }
+                                (add_button())
                             }
                             (repo_table(&tracked, selected_id, now))
                         }
@@ -353,6 +356,7 @@ async fn render_list(
                     }
                 }
             }
+            (add_dialog(form))
         })
         .into_string(),
     )
@@ -454,26 +458,51 @@ fn untrack_dialog(id: &RepoId) -> Markup {
     }
 }
 
-fn add_form(form: &AddForm) -> Markup {
+const ADD_DIALOG: &str = "add-repo";
+
+/// The "+ Add repo" button. Invoker commands open the dialog without
+/// script; the page's script covers browsers that lack them.
+fn add_button() -> Markup {
+    html! {
+        button .button.primary.small.add-button type="button" commandfor=(ADD_DIALOG)
+            command="show-modal" aria-haspopup="dialog" {
+            (icon_plus())
+            span { "Add repo" }
+        }
+    }
+}
+
+/// The add dialog. After a failed add it's open on load, with the URL as
+/// typed and the reason; without script it shows in place rather than as a
+/// modal.
+fn add_dialog(form: &AddForm) -> Markup {
     let invalid = form.error.is_some();
     html! {
-        section .card.add-repo {
-            form method="post" action="/repos" {
-                label for="repo-url" { "Repo URL" }
-                div .add-row {
-                    input #repo-url type="url" name="url" required
-                        placeholder="https://github.com/owner/repo"
-                        autocomplete="off" spellcheck="false"
-                        value=(form.url)
-                        aria-invalid=[invalid.then_some("true")]
-                        aria-describedby=[invalid.then_some("add-error")];
-                    button .button.primary type="submit" { "Add repo" }
+        dialog #(ADD_DIALOG) .dialog open[invalid] aria-labelledby={ (ADD_DIALOG) "-title" }
+            aria-describedby={ (ADD_DIALOG) "-body" } {
+            form .add-form method="post" action="/repos" {
+                h2 #{ (ADD_DIALOG) "-title" } { "Add a repo" }
+                p #{ (ADD_DIALOG) "-body" } {
+                    "The app clones it right away, then fetches it once per interval."
                 }
+                label for="repo-url" { "Repo URL" }
+                input #repo-url type="url" name="url" required autofocus
+                    placeholder="https://github.com/owner/repo"
+                    autocomplete="off" spellcheck="false"
+                    value=(form.url)
+                    aria-invalid=[invalid.then_some("true")]
+                    aria-describedby=[invalid.then_some("add-error")];
                 @if let Some(error) = &form.error {
                     p #add-error .form-error role="alert" {
                         (icon_circle_alert())
                         span { (error) }
                     }
+                }
+                div .dialog-actions {
+                    button .button.secondary type="submit" formmethod="dialog" formnovalidate {
+                        "Cancel"
+                    }
+                    button .button.primary type="submit" { "Add repo" }
                 }
             }
         }
@@ -846,18 +875,29 @@ fn layout(content: Markup) -> Markup {
     }
 }
 
-/// Opens the dialog a `data-dialog` button names, copies a `data-copy`
-/// button's text, and once a minute rewords every `data-ago` time the way
-/// [`time_ago`] does, by the browser's clock.
+/// Opens the dialog a `data-dialog` button names, or a `commandfor` button
+/// names where the browser lacks invoker commands; shows a dialog the page
+/// opened on load as a modal; copies a `data-copy` button's text; and once a
+/// minute rewords every `data-ago` time the way [`time_ago`] does, by the
+/// browser's clock.
 ///
 /// The clipboard API needs a secure context, which a plain-HTTP server on
 /// another host isn't, so copying falls back to selecting the text and
 /// copying the selection, as it does when the browser denies clipboard
 /// access.
 const SCRIPT: &str = r#"
+for (const dialog of document.querySelectorAll("dialog[open]")) {
+  dialog.close();
+  dialog.showModal();
+}
 document.addEventListener("click", (event) => {
   const opener = event.target.closest("[data-dialog]");
   if (opener) document.getElementById(opener.dataset.dialog).showModal();
+  const invoker = event.target.closest("[commandfor]");
+  if (invoker && !("commandForElement" in invoker)) {
+    const dialog = document.getElementById(invoker.getAttribute("commandfor"));
+    if (!dialog.open) dialog.showModal();
+  }
   const button = event.target.closest("[data-copy]");
   if (!button) return;
   const copied = () => {
@@ -893,6 +933,14 @@ setInterval(() => {
   }
 }, 60000);
 "#;
+
+/// Lucide `plus`.
+fn icon_plus() -> Markup {
+    PreEscaped(
+        r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>"#
+            .to_owned(),
+    )
+}
 
 /// Lucide `archive`.
 fn icon_archive() -> Markup {

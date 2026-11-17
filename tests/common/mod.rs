@@ -33,6 +33,8 @@ pub struct TestApp {
 
 pub struct Page {
     pub status: u16,
+    /// The path the response came from, after any redirect.
+    pub path: String,
     pub content_type: String,
     pub body: Vec<u8>,
 }
@@ -289,16 +291,17 @@ impl TestApp {
         list_page::ListPage::parse(&self.get("/").await.text())
     }
 
-    /// Fills in the list page's add form with this URL and submits it.
+    /// Fills in the add form in the list page's add dialog with this URL and
+    /// submits it.
     pub async fn add_repo(&self, url: &str) -> Page {
         let page = self.get("/").await.text();
         let action = {
             let html = scraper::Html::parse_document(&page);
-            let selector = scraper::Selector::parse("form:has(input[name=url])").unwrap();
+            let selector = scraper::Selector::parse("dialog form:has(input[name=url])").unwrap();
             let form = html
                 .select(&selector)
                 .next()
-                .unwrap_or_else(|| panic!("the list page has no add form: {page}"));
+                .unwrap_or_else(|| panic!("the list page has no add dialog: {page}"));
             assert_eq!(form.value().attr("method"), Some("post"));
             form.value()
                 .attr("action")
@@ -312,6 +315,7 @@ impl TestApp {
 impl Page {
     async fn from(response: reqwest::Response) -> Self {
         let status = response.status().as_u16();
+        let path = response.url().path().to_owned();
         let content_type = response
             .headers()
             .get("content-type")
@@ -320,6 +324,7 @@ impl Page {
         let body = response.bytes().await.unwrap().to_vec();
         Page {
             status,
+            path,
             content_type,
             body,
         }
