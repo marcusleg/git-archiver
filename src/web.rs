@@ -1104,8 +1104,10 @@ setInterval(() => {
 //
 // On a desktop, selecting a row swaps in the repo's page the same way and
 // pushes its URL, so the list stays where it was scrolled; back and forward
-// swap in the page of their entry. A narrow screen shows the list and a
-// repo on pages of their own, so there a row navigates as a plain link.
+// swap in the page of their entry, and the browser restores the scroll
+// position it had there. While a selection loads, updates wait for it. A
+// narrow screen shows the list and a repo on pages of their own, so there a
+// row navigates as a plain link.
 const main = document.querySelector("main[data-live]");
 if (main) {
   // The path whose page to show. It isn't always the URL's: a failed form
@@ -1116,20 +1118,28 @@ if (main) {
   let latest = 0;
   let stale = false;
   let busy = false;
+  let selecting = 0;
   const dialogOpen = () => document.querySelector("dialog[open]") !== null;
-  // Fetches the `wanted` page and swaps it in. A `live` update waits for an
-  // open dialog and keeps a failed action's banner; a selection does
-  // neither.
+  // Fetches the `wanted` page and swaps it in, unless a later fetch started
+  // meanwhile. A `live` update waits for an open dialog and keeps a failed
+  // action's banner; a selection does neither. Throws if the page can't be
+  // had and no later fetch started.
   const show = async (live) => {
     const fetching = ++latest;
     let path = wanted;
-    let response = await fetch(path);
-    if (response.status === 404 && path !== "/") {
-      path = "/";
-      response = await fetch(path);
+    let page;
+    try {
+      let response = await fetch(path);
+      if (response.status === 404 && path !== "/") {
+        path = "/";
+        response = await fetch(path);
+      }
+      if (!response.ok) throw new Error(`${path}: ${response.status}`);
+      page = new DOMParser().parseFromString(await response.text(), "text/html");
+    } catch (error) {
+      if (fetching === latest) throw error;
+      return;
     }
-    if (!response.ok) throw new Error(`${path}: ${response.status}`);
-    const page = new DOMParser().parseFromString(await response.text(), "text/html");
     if (fetching !== latest) return;
     const fresh = page.querySelector("main[data-live]");
     if (!fresh) throw new Error(`${path}: not a live page`);
@@ -1165,8 +1175,10 @@ if (main) {
     key: element.getAttribute("href") ?? element.getAttribute("aria-label") ?? element.textContent.trim(),
   });
 
+  // Brings the page up to date if a change was announced, once nothing
+  // holds it back, and again for changes announced meanwhile.
   const update = async () => {
-    if (busy || !stale || dialogOpen()) return;
+    if (busy || selecting || !stale || dialogOpen()) return;
     busy = true;
     stale = false;
     try {
@@ -1204,13 +1216,17 @@ if (main) {
 
   // Shows the page of `path`, whose URL the history already holds. Where
   // the app can't give it, the browser loads it instead, and says why.
-  const go = async (path) => {
+  const select = async (path) => {
     wanted = path;
+    selecting++;
     try {
       await show(false);
     } catch {
       location.replace(path);
+    } finally {
+      selecting--;
     }
+    update();
   };
   // Matches the width below which the stylesheet gives the list and each
   // repo a page of their own.
@@ -1222,9 +1238,9 @@ if (main) {
     event.preventDefault();
     const path = new URL(link.href).pathname;
     if (path !== location.pathname) history.pushState({ live: path }, "", path);
-    go(path);
+    select(path);
   });
-  addEventListener("popstate", (event) => go(event.state?.live ?? location.pathname));
+  addEventListener("popstate", (event) => select(event.state?.live ?? location.pathname));
 }
 "#;
 
