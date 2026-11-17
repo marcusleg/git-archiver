@@ -341,7 +341,7 @@ async fn a_fetch_updates_the_row_on_the_list_page() {
 }
 
 #[tokio::test]
-async fn a_dropped_event_stream_shows_a_note_and_reconnecting_refreshes_once() {
+async fn a_dropped_event_stream_shows_a_note_until_it_reconnects_and_the_page_catches_up() {
     let forge = FakeForge::start().await;
     let upstream = forge.create_repo("a/one");
     upstream.commit("first");
