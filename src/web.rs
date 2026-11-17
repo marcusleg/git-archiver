@@ -1040,8 +1040,10 @@ fn layout(title: &str, live_path: Option<&str>, content: Markup) -> Markup {
 /// Opens the dialog a `commandfor` button names where the browser lacks
 /// invoker commands, shows a dialog the page opened on load as a modal,
 /// copies a `data-copy` button's text, once a minute rewords every
-/// `data-ago` time the way [`time_ago`] does, by the browser's clock, and
-/// keeps a page marked `data-live` up to date (see [`events`]).
+/// `data-ago` time the way [`time_ago`] does, by the browser's clock,
+/// keeps a page marked `data-live` up to date (see [`events`]), and on a
+/// desktop selects a row without leaving the page, so the list keeps its
+/// scroll position.
 ///
 /// The clipboard API needs a secure context, which a plain-HTTP server on
 /// another host isn't, so copying falls back to selecting the text and
@@ -1093,49 +1095,55 @@ setInterval(() => {
   }
 }, 60000);
 
-// On each `changed` event, fetch the page's `data-live` path again and swap
-// in its content. Events that come while fetching fold into one more fetch.
-// While a dialog is open the swap waits, and happens once it closes. The
-// swap keeps the scroll position, the focus, open `<details>` and the
-// banner of a failed action. A repo page whose repo is gone becomes the
-// list.
+// A page marked `data-live` shows what its path renders. On each `changed`
+// event, fetch that path again and swap in its content. Events that come
+// while fetching fold into one more fetch. While a dialog is open the swap
+// waits, and happens once it closes. The swap keeps the scroll position,
+// the focus, open `<details>` and the banner of a failed action. A repo
+// page whose repo is gone becomes the list.
+//
+// On a desktop, selecting a row swaps in the repo's page the same way and
+// pushes its URL, so the list stays where it was scrolled; back and forward
+// swap in the page of their entry. A narrow screen shows the list and a
+// repo on pages of their own, so there a row navigates as a plain link.
 const main = document.querySelector("main[data-live]");
-if (main && "EventSource" in window) {
+if (main) {
+  // The path whose page to show. It isn't always the URL's: a failed form
+  // post shows the page of the path it came from.
+  let wanted = main.dataset.live;
+  history.replaceState({ live: wanted }, "");
+  // Each fetch is numbered, and only the latest one's page is shown.
+  let latest = 0;
   let stale = false;
   let busy = false;
   const dialogOpen = () => document.querySelector("dialog[open]") !== null;
-  const update = async () => {
-    if (busy || !stale || dialogOpen()) return;
-    busy = true;
-    stale = false;
-    try {
-      await swap();
-    } catch {
-      // The app can't be reached; the next event tries again.
-    } finally {
-      busy = false;
-    }
-    update();
-  };
-  const swap = async () => {
-    let path = main.dataset.live;
+  // Fetches the `wanted` page and swaps it in. A `live` update waits for an
+  // open dialog and keeps a failed action's banner; a selection does
+  // neither.
+  const show = async (live) => {
+    const fetching = ++latest;
+    let path = wanted;
     let response = await fetch(path);
     if (response.status === 404 && path !== "/") {
       path = "/";
       response = await fetch(path);
     }
-    if (!response.ok) return;
+    if (!response.ok) throw new Error(`${path}: ${response.status}`);
     const page = new DOMParser().parseFromString(await response.text(), "text/html");
+    if (fetching !== latest) return;
     const fresh = page.querySelector("main[data-live]");
-    if (!fresh) return;
-    if (dialogOpen()) {
+    if (!fresh) throw new Error(`${path}: not a live page`);
+    if (live && dialogOpen()) {
       stale = true;
       return;
     }
-    if (path !== main.dataset.live) history.replaceState(null, "", path);
+    if (path !== wanted) {
+      wanted = path;
+      history.replaceState({ live: path }, "", path);
+    }
     const [x, y] = [scrollX, scrollY];
     const banner = main.querySelector(":scope > [role=alert]");
-    if (banner) fresh.prepend(banner.cloneNode(true));
+    if (live && banner) fresh.prepend(banner.cloneNode(true));
     const card = (element) => element.closest("article")?.querySelector(".repo-url")?.textContent;
     const opened = [...main.querySelectorAll("details[open]")].map(card);
     for (const details of fresh.querySelectorAll("details")) {
@@ -1156,27 +1164,67 @@ if (main && "EventSource" in window) {
     tag: element.tagName,
     key: element.getAttribute("href") ?? element.getAttribute("aria-label") ?? element.textContent.trim(),
   });
-  const events = new EventSource("/events");
-  events.addEventListener("changed", () => {
-    stale = true;
+
+  const update = async () => {
+    if (busy || !stale || dialogOpen()) return;
+    busy = true;
+    stale = false;
+    try {
+      await show(true);
+    } catch {
+      // The app can't be reached; the next event tries again.
+    } finally {
+      busy = false;
+    }
     update();
-  });
-  // Changes may have gone unannounced while the stream was down.
-  let lost = false;
-  const note = document.querySelector(".live-note");
-  events.addEventListener("error", () => {
-    lost = true;
-    note.hidden = false;
-  });
-  events.addEventListener("open", () => {
-    note.hidden = true;
-    if (!lost) return;
-    lost = false;
-    stale = true;
-    update();
-  });
+  };
   // `close` doesn't bubble, so listen as it comes down from the document.
   document.addEventListener("close", update, true);
+  if ("EventSource" in window) {
+    const events = new EventSource("/events");
+    events.addEventListener("changed", () => {
+      stale = true;
+      update();
+    });
+    // Changes may have gone unannounced while the stream was down.
+    let lost = false;
+    const note = document.querySelector(".live-note");
+    events.addEventListener("error", () => {
+      lost = true;
+      note.hidden = false;
+    });
+    events.addEventListener("open", () => {
+      note.hidden = true;
+      if (!lost) return;
+      lost = false;
+      stale = true;
+      update();
+    });
+  }
+
+  // Shows the page of `path`, whose URL the history already holds. Where
+  // the app can't give it, the browser loads it instead, and says why.
+  const go = async (path) => {
+    wanted = path;
+    try {
+      await show(false);
+    } catch {
+      location.replace(path);
+    }
+  };
+  // Matches the width below which the stylesheet gives the list and each
+  // repo a page of their own.
+  const narrow = matchMedia("(max-width: 60rem)");
+  document.addEventListener("click", (event) => {
+    const link = event.target.closest(".row-link");
+    if (!link || narrow.matches || event.defaultPrevented || event.button !== 0
+        || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    const path = new URL(link.href).pathname;
+    if (path !== location.pathname) history.pushState({ live: path }, "", path);
+    go(path);
+  });
+  addEventListener("popstate", (event) => go(event.state?.live ?? location.pathname));
 }
 "#;
 
