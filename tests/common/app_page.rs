@@ -160,6 +160,11 @@ impl AppPage {
 
     /// The add dialog: the dialog the add form is in.
     pub fn add_dialog(&self) -> ElementRef<'_> {
+        assert_eq!(
+            select(&self.html, ADD_FORM).len(),
+            1,
+            "the page has one add form"
+        );
         self.add_form()
             .ancestors()
             .filter_map(ElementRef::wrap)
