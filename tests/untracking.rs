@@ -7,7 +7,7 @@ use common::forge::{FakeForge, Upstream};
 use common::git::{preserved_refs, refs};
 use std::time::Duration;
 
-use common::list_page::{select, select_in, text};
+use common::app_page::{select, select_in, text};
 use common::{HOUR, MINUTE, Page, TestApp, config_tracking, last_successes, three_repos, urls};
 use scraper::Html;
 

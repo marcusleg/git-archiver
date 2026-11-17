@@ -1,5 +1,6 @@
-//! Reading the list page the way a person sees it: the tables of tracked
-//! repos and untracked archives, and the selected repo's card in the pane.
+//! Reading the app's pages the way a person sees them: the list page at `/`
+//! and the repo pages, each with its tables of tracked repos and untracked
+//! archives and the selected repo's card in the pane.
 
 use scraper::{ElementRef, Html, Selector};
 
@@ -137,7 +138,7 @@ impl AppPage {
     }
 
     /// The first form that `selector` finds, after checking it posts.
-    pub fn post_form(&self, selector: &str) -> ElementRef<'_> {
+    pub fn posting_form(&self, selector: &str) -> ElementRef<'_> {
         let form = select(&self.html, selector)
             .into_iter()
             .next()

@@ -2,8 +2,8 @@
 
 mod common;
 
+use common::app_page::{AppPage, select, select_in, text};
 use common::forge::{DMCA_MESSAGE, DMCA_NOTICE, Failure, FakeForge};
-use common::list_page::{AppPage, select, select_in, text};
 use common::{HOUR, Page, TestApp, last_successes, three_repos, urls};
 use scraper::{ElementRef, Html};
 
@@ -105,17 +105,17 @@ async fn the_add_dialog_is_closed_and_holds_the_form() {
             select_in(&dialog, "p").iter().map(text).collect::<Vec<_>>(),
             ["The app clones it right away, then fetches it once per interval."]
         );
-        let form = &select_in(&dialog, "form")[0];
-        assert_eq!(form.value().attr("method"), Some("post"));
+        let parsed = AppPage::parse(&page.text());
+        let form = parsed.posting_form("dialog form:has(input[name=url])");
         assert_eq!(form.value().attr("action"), Some("/repos"));
-        let input = &select_in(form, "input[name=url]")[0];
+        let input = &select_in(&form, "input[name=url]")[0];
         let id = input.value().attr("id").unwrap();
         assert_eq!(
             text(&select(&html, &format!("label[for={id}]"))[0]),
             "Repo URL"
         );
         assert_eq!(
-            select_in(form, "button")
+            select_in(&form, "button")
                 .iter()
                 .map(text)
                 .collect::<Vec<_>>(),
@@ -139,11 +139,7 @@ async fn an_added_repo_is_cloned_right_away_and_shows_as_available() {
     assert_eq!(form_error(&page), None);
     let landed = AppPage::parse(&page.text());
     assert_eq!(
-        landed
-            .tracked()
-            .into_iter()
-            .map(|row| row.title)
-            .collect::<Vec<_>>(),
+        landed.titles("Tracked repos"),
         [upstream.url()],
         "lands on the list with the new repo in it"
     );

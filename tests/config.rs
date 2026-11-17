@@ -142,11 +142,7 @@ async fn hand_edit_error(config: &str) -> HandEditError {
         .unwrap_or_else(|| panic!("{config:?}: no config warning: {page}"))
         .text()
         .collect();
-    let repos: Vec<String> = common::list_page::AppPage::parse(&page)
-        .tracked()
-        .into_iter()
-        .map(|row| row.title)
-        .collect();
+    let repos = common::app_page::AppPage::parse(&page).titles("Tracked repos");
     assert_eq!(repos, [GOOD_REPO], "{config:?}: keeps the last good config");
     HandEditError {
         reason,
