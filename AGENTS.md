@@ -20,3 +20,7 @@ Single-context: one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/ag
 
 - Before opening a PR, run `git fetch origin`, rebase your branch onto `origin/main`, and rerun the tests on the result. If the branch is already pushed, push with `--force-with-lease`.
 - Merge with `gh pr merge --rebase`. The repo allows no other merge method.
+
+## Screenshots
+
+When a change alters how the list page looks, run `scripts/update-screenshots.sh` and commit the updated `docs/screenshots/*.png` in the same change.

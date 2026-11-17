@@ -208,7 +208,7 @@ Logs go to stdout. Every status change and every rewrite is logged with the repo
 
 ### Screenshots
 
-The screenshots above come from `scripts/update-screenshots.sh`, which runs the app against fake repos and photographs the list page in the same headless browser as the tests. The [screenshots workflow](.github/workflows/screenshots.yml) runs it after UI changes land on `main`, or on demand, and opens a pull request when the screenshots changed.
+The screenshots above come from `scripts/update-screenshots.sh`, which runs the app against fake repos and photographs the list page in the same headless browser as the tests. Rerun it in the same change as anything that alters how the list page looks, and commit the updated `docs/screenshots/*.png`.
 
 ## Releasing
 
