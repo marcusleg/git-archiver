@@ -69,6 +69,11 @@ impl RepoId {
         &self.host
     }
 
+    /// The path after the host, without leading or trailing slashes.
+    pub fn path(&self) -> &str {
+        &self.host_and_path[self.host.len() + 1..]
+    }
+
     /// Where the archive lives, relative to `repos/`.
     pub fn archive_path(&self) -> PathBuf {
         PathBuf::from(format!("{}.git", self.host_and_path))
