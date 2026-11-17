@@ -41,7 +41,6 @@ pub struct AppState {
 
 const STYLESHEET: &str = include_str!("../assets/style.css");
 
-/// The script of every page: see `assets/script.js`.
 const SCRIPT: &str = include_str!("../assets/script.js");
 
 const FONTS: &[(&str, &[u8])] = &[

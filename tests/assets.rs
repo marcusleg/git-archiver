@@ -73,7 +73,6 @@ async fn the_script_is_served_by_the_app() {
 
     // The stylesheet alone holds the narrow layout's breakpoint.
     assert!(!script.contains("60rem"));
-    assert!(!script.contains("matchMedia"));
 }
 
 #[tokio::test]

@@ -192,10 +192,13 @@ if (main) {
   // Whether the stylesheet lays the page out in one column, giving the list
   // and each repo a page of their own. The stylesheet alone knows the width
   // where that starts.
-  const narrow = () => getComputedStyle(main.querySelector(".columns")).gridTemplateColumns.split(" ").length < 2;
+  const narrow = (row) => {
+    const columns = getComputedStyle(row.closest(".columns")).gridTemplateColumns;
+    return columns.split(" ").length < 2;
+  };
   document.addEventListener("click", (event) => {
     const link = event.target.closest(".row-link");
-    if (!link || narrow() || event.defaultPrevented || event.button !== 0
+    if (!link || narrow(link) || event.defaultPrevented || event.button !== 0
         || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     const path = new URL(link.href).pathname;
