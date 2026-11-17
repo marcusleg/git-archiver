@@ -96,9 +96,9 @@ pub struct RepoView {
 /// Every repo the app knows, with what it remembers about fetching.
 #[derive(Debug, Clone)]
 pub struct View {
-    /// In config order.
+    /// Tracked repos, in config order.
     pub tracked: Vec<RepoView>,
-    /// Untracked archives, by `<host>/<path>`.
+    /// Untracked archives, in the order of `on_disk`.
     pub untracked: Vec<RepoView>,
     pub next_fetch: Option<SystemTime>,
     pub last_fetch_duration: Option<Duration>,

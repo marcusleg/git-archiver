@@ -175,7 +175,11 @@ async fn per_repo_series_follow_the_config_order_then_untracked_archives() {
         "https://example.com/Alpha/two",
     ])
     .await;
-    std::fs::create_dir_all(app.archive("example.com/beta/three")).unwrap();
+    // Exact-string order, as on disk, not the list page's case-insensitive
+    // order.
+    for archive in ["example.com/beta/three", "example.com/Gamma/four"] {
+        std::fs::create_dir_all(app.archive(archive)).unwrap();
+    }
 
     let metrics = app.metrics().await;
     let repos: Vec<&str> = metrics
@@ -189,6 +193,7 @@ async fn per_repo_series_follow_the_config_order_then_untracked_archives() {
         [
             "https://example.com/zeta/one",
             "https://example.com/Alpha/two",
+            "https://example.com/Gamma/four",
             "https://example.com/beta/three",
         ],
         "config order, not identity order"
