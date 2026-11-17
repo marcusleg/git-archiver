@@ -431,9 +431,10 @@ async fn each_tracked_card_offers_to_untrack_after_asking_what_to_do_with_the_ar
     let app = TestApp::tracking(&["https://github.com/foo/bar"]).await;
 
     let html = Html::parse_fragment(&card(&app, "https://github.com/foo/bar").await);
-    let opener = select(&html, "button[data-dialog]");
+    let opener = select(&html, "button[commandfor]");
     assert_eq!(opener.iter().map(text).collect::<Vec<_>>(), ["Untrack"]);
-    let dialog_id = opener[0].value().attr("data-dialog").unwrap();
+    assert_eq!(opener[0].value().attr("command"), Some("show-modal"));
+    let dialog_id = opener[0].value().attr("commandfor").unwrap();
     let dialog = &select(&html, &format!("dialog#{dialog_id}"))[0];
     assert_eq!(
         text(&select_in(dialog, "h2")[0]),
@@ -462,7 +463,7 @@ async fn untracked_archives_are_read_only() {
     untrack(&app, upstream.url(), "Keep archive").await;
     let list = app.list_page().await;
     assert_eq!(list.untracked().len(), 1);
-    let openers = select(&list.html, "main button[data-dialog]");
+    let openers = select(&list.html, "main article button[commandfor]");
     assert_eq!(
         openers.len(),
         1,

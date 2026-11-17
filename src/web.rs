@@ -433,8 +433,8 @@ fn status_label(state: &RepoState) -> Markup {
 fn untrack_dialog(id: &RepoId) -> Markup {
     let dialog = "untrack";
     html! {
-        button .button.secondary.small type="button" data-dialog=(dialog)
-            aria-haspopup="dialog" { "Untrack" }
+        button .button.secondary.small type="button" commandfor=(dialog)
+            command="show-modal" aria-haspopup="dialog" { "Untrack" }
         dialog #(dialog) .dialog aria-labelledby={ (dialog) "-title" }
             aria-describedby={ (dialog) "-body" } {
             form method="post" action="/repos/untrack" {
@@ -491,9 +491,9 @@ fn add_dialog(form: &AddForm) -> Markup {
                     autocomplete="off" spellcheck="false"
                     value=(form.url)
                     aria-invalid=[invalid.then_some("true")]
-                    aria-describedby=[invalid.then_some("add-error")];
+                    aria-describedby=[invalid.then_some(format!("{ADD_DIALOG}-error"))];
                 @if let Some(error) = &form.error {
-                    p #add-error .form-error role="alert" {
+                    p #{ (ADD_DIALOG) "-error" } .form-error role="alert" {
                         (icon_circle_alert())
                         span { (error) }
                     }
@@ -875,11 +875,10 @@ fn layout(content: Markup) -> Markup {
     }
 }
 
-/// Opens the dialog a `data-dialog` button names, or a `commandfor` button
-/// names where the browser lacks invoker commands; shows a dialog the page
-/// opened on load as a modal; copies a `data-copy` button's text; and once a
-/// minute rewords every `data-ago` time the way [`time_ago`] does, by the
-/// browser's clock.
+/// Opens the dialog a `commandfor` button names where the browser lacks
+/// invoker commands, shows a dialog the page opened on load as a modal,
+/// copies a `data-copy` button's text, and once a minute rewords every
+/// `data-ago` time the way [`time_ago`] does, by the browser's clock.
 ///
 /// The clipboard API needs a secure context, which a plain-HTTP server on
 /// another host isn't, so copying falls back to selecting the text and
@@ -891,8 +890,6 @@ for (const dialog of document.querySelectorAll("dialog[open]")) {
   dialog.showModal();
 }
 document.addEventListener("click", (event) => {
-  const opener = event.target.closest("[data-dialog]");
-  if (opener) document.getElementById(opener.dataset.dialog).showModal();
   const invoker = event.target.closest("[commandfor]");
   if (invoker && !("commandForElement" in invoker)) {
     const dialog = document.getElementById(invoker.getAttribute("commandfor"));

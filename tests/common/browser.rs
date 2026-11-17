@@ -445,7 +445,7 @@ impl Tab {
 
     /// The visible field whose label reads `label`.
     async fn field(&self, label: &str) -> Element {
-        let is_it = format!(
+        let has_label = format!(
             "function() {{
                 return this.checkVisibility()
                     && [...this.labels].some(l => l.innerText.trim() === {});
@@ -455,7 +455,7 @@ impl Tab {
         self.wait_until(&format!("a visible field labelled {label:?}"), || async {
             for field in self.page.find_elements("input").await.unwrap_or_default() {
                 let labelled = field
-                    .call_js_fn(is_it.clone(), false)
+                    .call_js_fn(has_label.clone(), false)
                     .await
                     .ok()
                     .and_then(|r| r.result.value)
