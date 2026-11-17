@@ -164,7 +164,7 @@ Preserved refs are named `refs/preserved/<UTC time of the rewrite>/heads/<branch
 
 The endpoint refuses pushes. Each archive is also an ordinary bare repo in `repos/` in the data directory, so you can inspect or recover it with plain `git` even without the app.
 
-The clone commands in the UI use the host and port your browser reached the app on, always over `http://`. If a reverse proxy serves the app over HTTPS, use `https://` instead.
+The clone commands in the UI use the host and port your browser reached the app on. Behind a reverse proxy, their scheme follows the `X-Forwarded-Proto` or `Forwarded: proto=` header, which most reverse proxies set, so a proxy that serves the app over HTTPS gets `https://` commands. Without either header, the commands use `http://`.
 
 ## Metrics
 

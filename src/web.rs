@@ -627,15 +627,71 @@ fn date(at: SystemTime) -> Markup {
     time_element(at, &format!("{day} {month} {year}"))
 }
 
-/// `http://<host>[:<port>]` as the browser reached the app, which is how
-/// git clients reach the git endpoint too.
+/// `<scheme>://<host>[:<port>]` as the browser reached the app, which is how
+/// git clients reach the git endpoint too. The host comes from `Host`, the
+/// scheme from [`forwarded_scheme`].
 fn endpoint_base(headers: &HeaderMap, uri: &Uri) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .or_else(|| uri.authority().map(|a| a.as_str()))
         .unwrap_or("localhost");
-    format!("http://{host}")
+    format!("{}://{host}", forwarded_scheme(headers))
+}
+
+const X_FORWARDED_PROTO: header::HeaderName = header::HeaderName::from_static("x-forwarded-proto");
+
+/// The scheme the client reached a reverse proxy in front of the app on:
+/// the `proto` of the first element of `Forwarded` (RFC 7239), else the first
+/// value of `X-Forwarded-Proto`, else `http`. Only `http` and `https` count.
+///
+/// These headers are trusted from anyone, without a list of trusted proxies,
+/// on purpose: the scheme only goes into the clone commands shown back to the
+/// same client, so a client that spoofs them only misleads itself.
+fn forwarded_scheme(headers: &HeaderMap) -> &'static str {
+    let header_str = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    let forwarded = header_str(header::FORWARDED).and_then(|value| {
+        first_forwarded_element(value)
+            .split(';')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("proto"))
+            .and_then(|(_, proto)| known_scheme(unquote(proto.trim())))
+    });
+    forwarded
+        .or_else(|| {
+            header_str(X_FORWARDED_PROTO)
+                .and_then(|value| known_scheme(value.split(',').next()?.trim()))
+        })
+        .unwrap_or("http")
+}
+
+/// The first element of a `Forwarded` value, the hop nearest the client: up
+/// to the first comma outside a quoted string.
+fn first_forwarded_element(value: &str) -> &str {
+    let mut quoted = false;
+    for (i, c) in value.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ',' if !quoted => return &value[..i],
+            _ => {}
+        }
+    }
+    value
+}
+
+/// `value` without the double quotes around it, if it has them.
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
+/// `http` or `https` for `scheme` in any case, or `None` for anything else.
+fn known_scheme(scheme: &str) -> Option<&'static str> {
+    ["http", "https"]
+        .into_iter()
+        .find(|known| scheme.eq_ignore_ascii_case(known))
 }
 
 /// The first 12 characters of a SHA, with the whole SHA on hover.
