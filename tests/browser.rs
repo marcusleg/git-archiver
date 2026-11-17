@@ -212,13 +212,20 @@ async fn app_tracking_a_long_list() -> (FakeForge, TestApp, Vec<String>) {
 }
 
 #[tokio::test]
-async fn selecting_a_row_on_a_desktop_keeps_the_lists_scroll_position() {
+async fn on_a_desktop_selecting_rows_keeps_the_scroll_and_moves_through_the_history() {
     let (forge, app, urls) = app_tracking_a_long_list().await;
     let browser = Browser::launch(Viewport::Desktop).await;
     let tab = browser.open(&format!("http://{}/", app.addr())).await;
     let identity = |name: &str| format!("{}/{name}", forge.host());
     let page = |name: &str| format!("/repos/{}", identity(name));
-    tab.shows_selected(&identity("a/one"), &urls[0]).await;
+    let selected = async |name: &str| {
+        let url = urls
+            .iter()
+            .find(|url| url.trim_end_matches(".git").ends_with(name))
+            .expect("a repo in the list");
+        tab.shows_selected(&identity(name), url).await;
+    };
+    selected("a/one").await;
     tab.mark_document().await;
 
     // A row far down the list: the list stays where it was scrolled.
@@ -226,30 +233,30 @@ async fn selecting_a_row_on_a_desktop_keeps_the_lists_scroll_position() {
     assert!(scrolled > 0.0, "the page scrolls");
     tab.click_row("b/r30").await;
     tab.arrives_at(&page("b/r30")).await;
-    tab.shows_selected(&identity("b/r30"), &urls[31]).await;
+    selected("b/r30").await;
     assert_eq!(tab.scroll_y().await, scrolled);
     tab.doesnt_see("All repos").await;
 
     let scrolled = tab.scroll_row_into_view("b/r35").await;
     tab.click_row("b/r35").await;
     tab.arrives_at(&page("b/r35")).await;
-    tab.shows_selected(&identity("b/r35"), &urls[36]).await;
+    selected("b/r35").await;
     assert_eq!(tab.scroll_y().await, scrolled);
     tab.still_shows_the_marked_document().await;
 
     // Back and forward move between the selections.
     tab.go_back().await;
-    tab.shows_selected(&identity("b/r30"), &urls[31]).await;
+    selected("b/r30").await;
     tab.go_back().await;
     tab.arrives_at("/").await;
-    tab.shows_selected(&identity("a/one"), &urls[0]).await;
+    selected("a/one").await;
     tab.go_forward().await;
-    tab.shows_selected(&identity("b/r30"), &urls[31]).await;
+    selected("b/r30").await;
     tab.still_shows_the_marked_document().await;
 
     // The URL holds the selection.
     tab.reload().await;
-    tab.shows_selected(&identity("b/r30"), &urls[31]).await;
+    selected("b/r30").await;
 }
 
 #[tokio::test]
