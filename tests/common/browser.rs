@@ -685,6 +685,55 @@ impl Tab {
         assert!(marked, "the page was reloaded or replaced");
     }
 
+    /// Asserts the tab shows a document loaded since [`Tab::mark_document`]
+    /// marked the last one: the browser navigated.
+    pub async fn shows_a_new_document(&self) {
+        let marked: bool = self
+            .page
+            .evaluate("window.testMark === true")
+            .await
+            .expect("read the mark")
+            .into_value()
+            .expect("the mark is a bool");
+        assert!(!marked, "the page didn't navigate");
+    }
+
+    /// Clicks the visible `<summary>` reading `label`, with a real mouse
+    /// click, opening or closing its `<details>`.
+    pub async fn click_summary(&self, label: &str) {
+        self.click("summary", label).await;
+    }
+
+    /// Moves keyboard focus to the visible button labelled `label` for
+    /// screen readers.
+    pub async fn focus_button(&self, label: &str) {
+        let button = self
+            .wait_until(&format!("a visible button labelled {label:?}"), || async {
+                for button in self.visible("button[aria-label]").await {
+                    if button.attribute("aria-label").await.ok()?.as_deref() == Some(label) {
+                        return Some(button);
+                    }
+                }
+                None
+            })
+            .await;
+        button.focus().await.expect("focus the button");
+    }
+
+    /// The label of the element with keyboard focus: its `aria-label`, or
+    /// else its text.
+    pub async fn focused(&self) -> String {
+        self.page
+            .evaluate(
+                "document.activeElement.getAttribute('aria-label') \
+                 ?? document.activeElement.innerText.trim()",
+            )
+            .await
+            .expect("read the focus")
+            .into_value()
+            .expect("the label is a string")
+    }
+
     /// Scrolls the page down to `y` pixels from the top, or as far as it
     /// goes, and returns where it ended up. Waits for the fonts first: as
     /// they load, the text changes size and the browser scrolls to keep

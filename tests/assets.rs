@@ -41,10 +41,6 @@ async fn the_page_loads_no_resources_from_other_hosts() {
     for resource in &resources {
         assert!(is_same_origin(resource), "page loads {resource}");
     }
-    assert!(
-        !page.contains("<script src"),
-        "scripts are inline, not loaded"
-    );
 
     let css = app.get("/assets/style.css").await;
     assert_eq!(css.status, 200);
@@ -58,6 +54,26 @@ async fn the_page_loads_no_resources_from_other_hosts() {
         assert!(is_same_origin(&url), "stylesheet loads {url}");
     }
     assert!(!css.contains("@import"));
+}
+
+#[tokio::test]
+async fn the_script_is_served_by_the_app() {
+    let app = TestApp::start().await;
+    let page = app.get("/").await.text();
+    assert!(page_resources(&page).contains(&"/assets/script.js".to_owned()));
+
+    let script = app.get("/assets/script.js").await;
+    assert_eq!(script.status, 200);
+    assert_eq!(script.content_type, "text/javascript; charset=utf-8");
+    let script = script.text();
+    assert!(
+        script.contains("new EventSource(\"/events\")"),
+        "the page script"
+    );
+
+    // The stylesheet alone holds the narrow layout's breakpoint.
+    assert!(!script.contains("60rem"));
+    assert!(!script.contains("matchMedia"));
 }
 
 #[tokio::test]
