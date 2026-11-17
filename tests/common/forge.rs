@@ -121,12 +121,12 @@ impl FakeForge {
             .failing
             .lock()
             .unwrap()
-            .insert(prefix(path), failure);
+            .insert(repo_prefix(path), failure);
     }
 
     /// Serves the repo at `path` normally again.
     pub fn restore(&self, path: &str) {
-        self.behaviour.failing.lock().unwrap().remove(&prefix(path));
+        self.behaviour.failing.lock().unwrap().remove(&repo_prefix(path));
     }
 
     /// Stops answering altogether: connections to the forge are refused
@@ -161,7 +161,7 @@ impl FakeForge {
             .redirects
             .lock()
             .unwrap()
-            .push((prefix(path), format!("{}/", to.url())));
+            .push((repo_prefix(path), format!("{}/", to.url())));
     }
 
     /// Every `Authorization` header the forge has received.
@@ -397,7 +397,7 @@ async fn http_backend(State(behaviour): State<Arc<Behaviour>>, request: Request)
 }
 
 /// The request path prefix of the repo at `path`.
-fn prefix(path: &str) -> String {
+fn repo_prefix(path: &str) -> String {
     format!("/{path}.git/")
 }
 
@@ -417,7 +417,10 @@ async fn fail(behaviour: &Behaviour, failure: Failure) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal server error\n".to_owned(),
         ),
-        Failure::Hang | Failure::HangTransfer => {
+        Failure::HangTransfer => unreachable!(
+            "the handler decides a hung transfer once it knows the request body, then fails with Hang"
+        ),
+        Failure::Hang => {
             behaviour.hung_requests.fetch_add(1, Ordering::SeqCst);
             std::future::pending::<()>().await;
             unreachable!()
