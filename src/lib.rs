@@ -11,6 +11,7 @@ mod overview;
 mod scheduler;
 mod state;
 mod tracking;
+mod upstream;
 mod web;
 
 use std::net::SocketAddr;

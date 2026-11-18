@@ -27,6 +27,7 @@ use crate::metrics;
 use crate::overview::{RepoView, SharedOverview, View};
 use crate::state::{RepoState, Status};
 use crate::tracking::{ArchiveChoice, TrackOutcome, Tracking, UntrackOutcome};
+use crate::upstream;
 
 pub struct AppState {
     pub config_path: PathBuf,
@@ -781,7 +782,9 @@ fn repo_card(card: &CardView, base: &str, now: SystemTime) -> Markup {
     html! {
         article .card {
             div .card-head {
-                h3 .repo-url { (title) }
+                h3 .repo-url {
+                    (upstream_link(Some(upstream::repo_url(id)), html! { (title) }))
+                }
                 @if *tracked {
                     (untrack_dialog(id))
                 }
@@ -802,7 +805,10 @@ fn repo_card(card: &CardView, base: &str, now: SystemTime) -> Markup {
                     dt { "Default branch" }
                     dd {
                         @match &inspection.default_branch {
-                            Some(branch) => code { (branch) },
+                            Some(branch) => (upstream_link(
+                                upstream::branch_url(id, branch),
+                                html! { code { (branch) } },
+                            )),
                             None => span .muted { "—" },
                         }
                     }
@@ -811,7 +817,7 @@ fn repo_card(card: &CardView, base: &str, now: SystemTime) -> Markup {
                     dt { "Tip" }
                     dd {
                         @match &inspection.tip {
-                            Some(sha) => (short_sha(sha)),
+                            Some(sha) => (upstream_link(upstream::commit_url(id, sha), short_sha(sha))),
                             None if fetched => span .muted { "No commits yet" },
                             None => span .muted { "—" },
                         }
@@ -982,6 +988,17 @@ fn known_scheme(scheme: &str) -> Option<&'static str> {
     ["http", "https"]
         .into_iter()
         .find(|known| scheme.eq_ignore_ascii_case(known))
+}
+
+/// `content` linking to `href` upstream, or plain without one. The link
+/// sends no `Referer`, so upstream doesn't learn where the archive lives.
+fn upstream_link(href: Option<String>, content: Markup) -> Markup {
+    html! {
+        @match href {
+            Some(href) => a .upstream href=(href) rel="noreferrer" { (content) },
+            None => (content),
+        }
+    }
 }
 
 /// The first 12 characters of a SHA, with the whole SHA on hover.
