@@ -12,52 +12,36 @@ pub fn repo_url(id: &RepoId) -> String {
 /// The branch's page upstream, or `None` on a host whose layout we don't
 /// know.
 pub fn branch_url(id: &RepoId, branch: &str) -> Option<String> {
-    let forge = Forge::of(id)?;
-    Some(page_url(id, forge.branch_prefix(), branch.split('/')))
+    let layout = Layout::of(id)?;
+    Some(page_url(id, layout.branch, branch.split('/')))
 }
 
 /// The commit's page upstream, or `None` on a host whose layout we don't
 /// know.
 pub fn commit_url(id: &RepoId, sha: &str) -> Option<String> {
-    let forge = Forge::of(id)?;
-    Some(page_url(id, forge.commit_prefix(), [sha]))
+    let layout = Layout::of(id)?;
+    Some(page_url(id, layout.commit, [sha]))
 }
 
-/// A forge whose URL layout we know. Self-hosted forges can lay out their
-/// pages any way, so only these hosts get branch and commit links.
-#[derive(Clone, Copy)]
-enum Forge {
-    GitHub,
-    GitLab,
-    Codeberg,
+/// Where a forge puts a repo's branch and commit pages: the path segments
+/// between the repo and a branch name or a commit's SHA.
+struct Layout {
+    branch: &'static [&'static str],
+    commit: &'static [&'static str],
 }
 
-impl Forge {
-    /// The forge `id` lives on, matched by host and port exactly.
+impl Layout {
+    /// The layout of the forge `id` lives on, matched by host and port
+    /// exactly. Self-hosted forges can lay out their pages any way, so only
+    /// these hosts get branch and commit links.
     fn of(id: &RepoId) -> Option<Self> {
-        match id.host() {
-            "github.com" => Some(Forge::GitHub),
-            "gitlab.com" => Some(Forge::GitLab),
-            "codeberg.org" => Some(Forge::Codeberg),
-            _ => None,
-        }
-    }
-
-    /// The path segments between the repo and a branch name.
-    fn branch_prefix(self) -> &'static [&'static str] {
-        match self {
-            Forge::GitHub => &["tree"],
-            Forge::GitLab => &["-", "tree"],
-            Forge::Codeberg => &["src", "branch"],
-        }
-    }
-
-    /// The path segments between the repo and a commit's SHA.
-    fn commit_prefix(self) -> &'static [&'static str] {
-        match self {
-            Forge::GitHub | Forge::Codeberg => &["commit"],
-            Forge::GitLab => &["-", "commit"],
-        }
+        let (branch, commit): (&[&str], &[&str]) = match id.host() {
+            "github.com" => (&["tree"], &["commit"]),
+            "gitlab.com" => (&["-", "tree"], &["-", "commit"]),
+            "codeberg.org" => (&["src", "branch"], &["commit"]),
+            _ => return None,
+        };
+        Some(Self { branch, commit })
     }
 }
 
@@ -80,6 +64,7 @@ fn page_url<'a>(
 mod tests {
     use super::*;
 
+    /// The identity of `url`, which must be valid.
     fn id(url: &str) -> RepoId {
         RepoId::from_url(url).unwrap()
     }
