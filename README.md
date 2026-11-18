@@ -68,7 +68,7 @@ docker run -d --name git-archiver --restart unless-stopped \
 
 Keep `listen` in the config at its default of `0.0.0.0:8080` inside the container, and choose where the port is reachable with `-p`.
 
-To build the image yourself, run `docker build -t git-archiver .`.
+To build the image yourself, run `docker build -t git-archiver -f Containerfile .`.
 
 ### Binary
 

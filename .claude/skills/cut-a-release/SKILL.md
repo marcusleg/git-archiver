@@ -34,7 +34,7 @@ A **pre-release**, only when the user asks for one, is `X.Y.Z-rc.N`: `X.Y.Z` pic
 git fetch origin --tags
 last=$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*' origin/main)   # fails: first release, use the whole history
 git log --format='%h %s' "$last"..origin/main
-git diff --stat "$last"..origin/main -- src/main.rs src/config.rs src/default_config.toml src/state.rs src/archive.rs src/identity.rs src/git_http.rs src/metrics.rs Dockerfile .github/workflows/release.yml
+git diff --stat "$last"..origin/main -- src/main.rs src/config.rs src/default_config.toml src/state.rs src/archive.rs src/identity.rs src/git_http.rs src/metrics.rs Containerfile .github/workflows/release.yml
 ```
 
 Main is linear and a PR lands as several commits, so subjects carry no PR number. Find it with `gh api repos/{owner}/{repo}/commits/<sha>/pulls --jq '.[].number'`; a commit pushed straight to main has none.
