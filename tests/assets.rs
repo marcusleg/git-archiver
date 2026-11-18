@@ -192,3 +192,30 @@ async fn the_stylesheet_uses_the_design_system_dark_tokens() {
     ));
     assert!(!css.contains("box-shadow"), "flat");
 }
+
+#[tokio::test]
+async fn the_page_icons_are_served_by_the_app() {
+    let app = TestApp::start().await;
+    let html = Html::parse_document(&app.get("/").await.text());
+    let href = |selector: &str| {
+        html.select(&Selector::parse(selector).unwrap())
+            .next()
+            .unwrap_or_else(|| panic!("no {selector}"))
+            .value()
+            .attr("href")
+            .unwrap()
+            .to_owned()
+    };
+
+    let icon = app
+        .get(&href(r#"link[rel="icon"][type="image/svg+xml"]"#))
+        .await;
+    assert_eq!(icon.status, 200);
+    assert_eq!(icon.content_type, "image/svg+xml");
+    assert!(icon.text().starts_with("<svg "));
+
+    let touch = app.get(&href(r#"link[rel="apple-touch-icon"]"#)).await;
+    assert_eq!(touch.status, 200);
+    assert_eq!(touch.content_type, "image/png");
+    assert_eq!(&touch.body[..8], b"\x89PNG\r\n\x1a\n");
+}
