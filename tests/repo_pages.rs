@@ -41,14 +41,14 @@ async fn each_row_links_to_its_repos_page() {
 }
 
 #[tokio::test]
-async fn a_repo_page_selects_that_repo_and_names_it_in_the_title() {
+async fn a_repo_page_selects_that_repo() {
     let app = two_repos().await;
 
     let list = app.page("/repos/gitlab.com/group/sub/project").await;
 
     assert_eq!(list.pane_title().as_deref(), Some(PROJECT));
     assert_eq!(selected(&list), [PROJECT]);
-    assert_eq!(list.title(), "gitlab.com/group/sub/project · Git Archiver");
+    assert_eq!(list.title(), "Git Archiver");
     assert_eq!(list.tracked().len(), 2, "the page lists every repo");
 }
 
@@ -194,5 +194,5 @@ async fn a_failed_untrack_shows_that_repos_page_with_the_error() {
     assert!(alert.contains("Couldn’t untrack the repo"), "{alert}");
     assert_eq!(list.pane_title().as_deref(), Some(PROJECT));
     assert_eq!(selected(&list), [PROJECT]);
-    assert_eq!(list.title(), "gitlab.com/group/sub/project · Git Archiver");
+    assert_eq!(list.title(), "Git Archiver");
 }

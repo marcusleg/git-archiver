@@ -342,7 +342,6 @@ async fn repo_page(State(app): State<Arc<AppState>>, headers: HeaderMap, uri: Ur
 /// The page for a path that names no repo the app knows.
 fn not_found() -> Response {
     let page = layout(
-        "Repo not found · Git Archiver",
         None,
         html! {
             section .card.empty {
@@ -410,13 +409,6 @@ enum Page<'a> {
 }
 
 impl Page<'_> {
-    fn title(self) -> String {
-        match self {
-            Page::List => "Git Archiver".to_owned(),
-            Page::Repo(id) => format!("{} · Git Archiver", id.host_and_path()),
-        }
-    }
-
     /// Where the page lives, which the page fetches again to update itself.
     /// After a failed action the browser shows a page at the action's
     /// address, which only takes a POST, so this isn't always the URL shown.
@@ -470,7 +462,6 @@ async fn render_page(
 
     Some(Html(
         layout(
-            &page.title(),
             Some(&page.path()),
             html! {
                 @if let Some(problem) = problem {
@@ -1086,9 +1077,9 @@ fn format_size(bytes: u64) -> String {
     format!("{value:.1} {unit}")
 }
 
-/// A page of the app titled `title`, around `content`. With a `live_path`,
-/// the page's script keeps `content` up to date from that path.
-fn layout(title: &str, live_path: Option<&str>, content: Markup) -> Markup {
+/// A page of the app around `content`, titled "Git Archiver". With a
+/// `live_path`, the page's script keeps `content` up to date from that path.
+fn layout(live_path: Option<&str>, content: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -1096,7 +1087,7 @@ fn layout(title: &str, live_path: Option<&str>, content: Markup) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="color-scheme" content="dark";
-                title { (title) }
+                title { "Git Archiver" }
                 link rel="icon" type="image/svg+xml" href="/assets/favicon.svg";
                 link rel="apple-touch-icon" href="/assets/apple-touch-icon.png";
                 link rel="stylesheet" href="/assets/style.css";
