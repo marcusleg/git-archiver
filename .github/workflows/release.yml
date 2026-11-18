@@ -1,7 +1,7 @@
 name: Release
 
 # Pushing a version tag such as v1.2.3 builds the Linux amd64 and arm64
-# binaries and the container image from the same Dockerfile, publishes the
+# binaries and the container image from the same Containerfile, publishes the
 # image to GHCR and attaches the binaries to a GitHub release.
 on:
   push:
@@ -55,6 +55,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Containerfile
           platforms: linux/${{ matrix.arch }}
           target: binary
           outputs: type=local,dest=out
@@ -75,6 +76,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Containerfile
           platforms: linux/${{ matrix.arch }}
           load: true
           tags: git-archiver:smoke-test
@@ -88,6 +90,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Containerfile
           platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
