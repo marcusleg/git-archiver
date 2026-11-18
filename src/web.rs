@@ -1,4 +1,4 @@
-//! The web UI: server-rendered HTML, with the stylesheet and fonts embedded in
+//! The web UI: server-rendered HTML, with the stylesheet, fonts and icons embedded in
 //! the binary so the page loads nothing from other hosts.
 
 use std::collections::BTreeMap;
@@ -59,6 +59,11 @@ const FONTS: &[(&str, &[u8])] = &[
     ),
 ];
 
+const FAVICON: &str = include_str!("../assets/favicon.svg");
+
+/// The favicon on a square, full-bleed ground: iOS rounds the corners itself.
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../assets/apple-touch-icon.png");
+
 const ASSET_CACHE: &str = "public, max-age=3600";
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -73,6 +78,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/assets/style.css", get(stylesheet))
         .route("/assets/script.js", get(script))
         .route("/assets/fonts/{name}", get(font))
+        .route("/assets/favicon.svg", get(favicon))
+        .route("/assets/apple-touch-icon.png", get(apple_touch_icon))
         .with_state(state)
 }
 
@@ -153,6 +160,14 @@ async fn font(Path(name): Path<String>) -> Response {
         Some((_, bytes)) => asset("font/woff2", bytes),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn favicon() -> Response {
+    asset("image/svg+xml", FAVICON.as_bytes())
+}
+
+async fn apple_touch_icon() -> Response {
+    asset("image/png", APPLE_TOUCH_ICON)
 }
 
 fn asset(content_type: &'static str, body: &'static [u8]) -> Response {
@@ -1082,8 +1097,8 @@ fn layout(title: &str, live_path: Option<&str>, content: Markup) -> Markup {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="color-scheme" content="dark";
                 title { (title) }
-                // No product mark: an empty icon stops the browser asking for /favicon.ico.
-                link rel="icon" href="data:,";
+                link rel="icon" type="image/svg+xml" href="/assets/favicon.svg";
+                link rel="apple-touch-icon" href="/assets/apple-touch-icon.png";
                 link rel="stylesheet" href="/assets/style.css";
             }
             body {
