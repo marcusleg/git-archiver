@@ -1,9 +1,9 @@
 mod common;
 
-use common::app_page::{AppPage, select, text};
+use common::app_page::{AppPage, select, select_in, text};
 use common::forge::{Failure, FakeForge};
 use common::git::refs;
-use common::{HOUR, MINUTE, TestApp};
+use common::{HOUR, MINUTE, TestApp, config_tracking};
 use scraper::{Html, Selector};
 
 #[tokio::test]
@@ -580,4 +580,103 @@ async fn sorting_the_page_leaves_the_config_file_unchanged() {
 
     app.get("/").await;
     assert_eq!(app.config(), config);
+}
+
+/// Each link in `element`, as its `href`, its `rel` and its text.
+fn links(element: &scraper::ElementRef) -> Vec<(String, String, String)> {
+    select_in(element, "a")
+        .iter()
+        .map(|a| {
+            let attr = |name| a.value().attr(name).unwrap_or_default().to_owned();
+            (attr("href"), attr("rel"), text(a))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn on_an_unknown_host_only_the_cards_title_links_upstream() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo_with_default_branch("foo/bar", "trunk");
+    upstream.commit("first");
+    let url = upstream.url().to_owned();
+    assert!(url.ends_with(".git"), "{url}");
+    let app = TestApp::tracking(&[&url]).await;
+    app.advance_and_settle(24 * HOUR).await;
+
+    let page = app.list_page().await;
+    let card = page.pane_card().unwrap();
+    let title = &select_in(&card, ".repo-url")[0];
+    assert_eq!(
+        links(title),
+        [(
+            format!("http://{}/foo/bar", forge.host()),
+            "noreferrer".to_owned(),
+            url.clone()
+        )]
+    );
+    for name in ["Default branch", "Tip"] {
+        let value = field_value(&card, name);
+        assert_eq!(links(&value), [], "{name} is plain text");
+        assert_eq!(select_in(&value, "code").len(), 1, "{name} still shows");
+    }
+}
+
+#[tokio::test]
+async fn on_a_known_forge_the_default_branch_and_tip_link_upstream_too() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo_with_default_branch("foo/bar", "release/v1");
+    let tip = upstream.commit("first");
+    let mut app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    // Pass the archive off as github.com's, which the fake forge can't be.
+    app.stop().await;
+    let archive = app.archive("github.com/foo/bar");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::rename(app.archive(&format!("{}/foo/bar", forge.host())), archive).unwrap();
+    app.write_config(&config_tracking(&["https://github.com/foo/bar.git"]));
+    app.start_again().await;
+
+    let page = app.list_page().await;
+    let card = page.pane_card().unwrap();
+    let noreferrer = || "noreferrer".to_owned();
+    assert_eq!(
+        links(&select_in(&card, ".repo-url")[0]),
+        [(
+            "https://github.com/foo/bar".to_owned(),
+            noreferrer(),
+            "https://github.com/foo/bar.git".to_owned()
+        )]
+    );
+    assert_eq!(
+        links(&field_value(&card, "Default branch")),
+        [(
+            "https://github.com/foo/bar/tree/release/v1".to_owned(),
+            noreferrer(),
+            "release/v1".to_owned()
+        )]
+    );
+    let tip_value = field_value(&card, "Tip");
+    assert_eq!(
+        links(&tip_value),
+        [(
+            format!("https://github.com/foo/bar/commit/{tip}"),
+            noreferrer(),
+            tip[..12].to_owned()
+        )]
+    );
+    let sha = &select_in(&tip_value, "a code.sha")[0];
+    assert_eq!(sha.value().attr("title"), Some(tip.as_str()));
+}
+
+#[tokio::test]
+async fn placeholders_for_a_missing_default_branch_and_tip_never_link() {
+    let app = TestApp::tracking(&["https://github.com/foo/bar"]).await;
+
+    let page = app.list_page().await;
+    let card = page.pane_card().unwrap();
+    for name in ["Default branch", "Tip"] {
+        let value = field_value(&card, name);
+        assert_eq!(text(&value), "—");
+        assert_eq!(links(&value), [], "{name}");
+    }
 }
