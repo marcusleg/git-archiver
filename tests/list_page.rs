@@ -582,6 +582,22 @@ async fn sorting_the_page_leaves_the_config_file_unchanged() {
     assert_eq!(app.config(), config);
 }
 
+/// Restarts `app` with the archive of `path`, fetched from `forge`, and its
+/// state passed off as github.com's, which the fake forge can't be, tracking
+/// `tracked`.
+async fn pass_off_as_github(app: &mut TestApp, forge: &FakeForge, path: &str, tracked: &[&str]) {
+    app.stop().await;
+    let archive = app.archive(&format!("github.com/{path}"));
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::rename(app.archive(&format!("{}/{path}", forge.host())), archive).unwrap();
+    let state_path = app.data_dir().join("state.json");
+    let state = std::fs::read_to_string(&state_path).unwrap();
+    let state = state.replace(&format!("http://{}/", forge.host()), "https://github.com/");
+    std::fs::write(&state_path, state).unwrap();
+    app.write_config(&config_tracking(tracked));
+    app.start_on_new_port().await;
+}
+
 /// Each link in `element`, as its `href`, its `rel` and its text.
 fn links(element: &scraper::ElementRef) -> Vec<(String, String, String)> {
     select_in(element, "a")
@@ -628,13 +644,13 @@ async fn on_a_known_forge_the_default_branch_and_tip_link_upstream_too() {
     let tip = upstream.commit("first");
     let mut app = TestApp::tracking(&[upstream.url()]).await;
     app.advance_and_settle(24 * HOUR).await;
-    // Pass the archive off as github.com's, which the fake forge can't be.
-    app.stop().await;
-    let archive = app.archive("github.com/foo/bar");
-    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
-    std::fs::rename(app.archive(&format!("{}/foo/bar", forge.host())), archive).unwrap();
-    app.write_config(&config_tracking(&["https://github.com/foo/bar.git"]));
-    app.start_again().await;
+    pass_off_as_github(
+        &mut app,
+        &forge,
+        "foo/bar",
+        &["https://github.com/foo/bar.git"],
+    )
+    .await;
 
     let page = app.list_page().await;
     let card = page.pane_card().unwrap();
@@ -679,4 +695,64 @@ async fn placeholders_for_a_missing_default_branch_and_tip_never_link() {
         assert_eq!(text(&value), "—");
         assert_eq!(links(&value), [], "{name}");
     }
+}
+
+#[tokio::test]
+async fn an_empty_repo_on_a_known_forge_says_no_commits_yet_without_a_link() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo("foo/empty");
+    let mut app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    pass_off_as_github(
+        &mut app,
+        &forge,
+        "foo/empty",
+        &["https://github.com/foo/empty"],
+    )
+    .await;
+
+    let page = app.list_page().await;
+    let card = page.pane_card().unwrap();
+    let tip = field_value(&card, "Tip");
+    assert_eq!(text(&tip), "No commits yet");
+    assert_eq!(links(&tip), []);
+    assert_eq!(links(&field_value(&card, "Default branch")), []);
+}
+
+#[tokio::test]
+async fn an_untracked_archive_links_upstream_like_a_tracked_repo() {
+    let forge = FakeForge::start().await;
+    let upstream = forge.create_repo_with_default_branch("foo/bar", "main");
+    let tip = upstream.commit("first");
+    let mut app = TestApp::tracking(&[upstream.url()]).await;
+    app.advance_and_settle(24 * HOUR).await;
+    pass_off_as_github(&mut app, &forge, "foo/bar", &[]).await;
+
+    let page = app.page("/repos/github.com/foo/bar").await;
+    assert_eq!(
+        page.untracked()
+            .iter()
+            .map(|r| r.repo.as_str())
+            .collect::<Vec<_>>(),
+        ["github.com/foo/bar"]
+    );
+    let card = page.pane_card().unwrap();
+    let hrefs = |element| {
+        links(&element)
+            .into_iter()
+            .map(|(href, ..)| href)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        hrefs(select_in(&card, ".repo-url")[0]),
+        ["https://github.com/foo/bar"]
+    );
+    assert_eq!(
+        hrefs(field_value(&card, "Default branch")),
+        ["https://github.com/foo/bar/tree/main"]
+    );
+    assert_eq!(
+        hrefs(field_value(&card, "Tip")),
+        [format!("https://github.com/foo/bar/commit/{tip}")]
+    );
 }

@@ -157,6 +157,12 @@ impl TestApp {
     /// The clock keeps its time.
     pub async fn restart(&mut self) {
         self.stop().await;
+        self.start_on_new_port().await;
+    }
+
+    /// Starts a stopped app again against the same data directory, on a new
+    /// random port, for when nothing needs the address it had.
+    pub async fn start_on_new_port(&mut self) {
         self.boot().await.expect("app restarts");
     }
 
