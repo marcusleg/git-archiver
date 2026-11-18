@@ -43,6 +43,11 @@ const CANDIDATES: &[&str] = &[
 /// How long a test waits for the page to show what it expects.
 const PATIENCE: Duration = Duration::from_secs(10);
 
+/// How long a browser gets to start. Each test launches its own, many at
+/// once, and on a CI runner a cold start under that load can outlast
+/// chromiumoxide's default of 20 seconds.
+const LAUNCH_PATIENCE: Duration = Duration::from_secs(60);
+
 /// How far the clock of a tab opened with [`Browser::open_at`] moves at a
 /// time while its page loads.
 const LOAD_STEP: Duration = Duration::from_millis(10);
@@ -156,6 +161,7 @@ impl Browser {
             .user_data_dir(profile.path())
             .chrome_executable(binary)
             .viewport(emulation)
+            .launch_timeout(LAUNCH_PATIENCE)
             .args(args.iter().copied())
             // CI runners forbid the sandbox's user namespaces.
             .no_sandbox()
