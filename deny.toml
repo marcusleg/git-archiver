@@ -1,0 +1,50 @@
+# cargo-deny's checks of every crate in Cargo.lock: `cargo deny check`.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Fails on a crate with a known vulnerability or that its authors abandoned.
+# An advisory we accept goes in `ignore` with its id and why.
+ignore = [
+    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained but has no known vulnerability; replacing it changes how the config and state files are parsed, so it gets a pull request of its own" },
+]
+
+[licenses]
+# Test-only crates count too: the standard covers every dependency.
+include-dev = true
+# The allowlist of docs/standards/licences.md, limited to identifiers a crate
+# uses today. A licence from that list that a new crate needs is added here
+# in the same pull request; one not on that list changes the standard first.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+]
+# MPL-2.0 is allowed only for crates used unmodified, and a pull request that
+# adds one says whether it ships (docs/standards/licences.md). Naming each
+# crate here makes CI stop the pull request until it does.
+exceptions = [
+    # All four reach us only through the dev-dependency `scraper`.
+    { crate = "cssparser", allow = ["MPL-2.0"] },
+    { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+    { crate = "dtoa-short", allow = ["MPL-2.0"] },
+    { crate = "selectors", allow = ["MPL-2.0"] },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+# Crates come from crates.io only.
+unknown-registry = "deny"
+unknown-git = "deny"
