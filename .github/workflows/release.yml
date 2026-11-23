@@ -52,7 +52,7 @@ jobs:
           images: ${{ env.IMAGE }}
 
       - name: Build the binary
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Containerfile
@@ -73,7 +73,7 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
 
       - name: Build the image for the smoke test
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Containerfile
@@ -87,7 +87,7 @@ jobs:
 
       - name: Push the image by digest
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Containerfile
