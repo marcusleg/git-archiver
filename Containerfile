@@ -2,7 +2,7 @@
 
 # Builds a static musl binary, so the same file runs in the image below and on
 # any Linux host (it's also what the release attaches).
-FROM docker.io/library/rust:1.98-alpine AS build
+FROM docker.io/library/rust:1.100-alpine AS build
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
